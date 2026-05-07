@@ -8,6 +8,7 @@ import { getDb } from "./db";
 import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification, contactOrigins, energyConfig, users } from "../drizzle/schema";
 import { eq, desc, and, sql, like, or } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
+import OpenAI from "openai";
 
 export const appRouter = router({
   system: systemRouter,
@@ -258,7 +259,7 @@ export const appRouter = router({
     askObjection: protectedProcedure
       .input(z.object({ objection: z.string().min(1) }))
       .mutation(async ({ input }) => {
-        const systemPrompt = `Você é um assistente de vendas especializado em Telecomunicações e Energia em Portugal. 
+        const systemPrompt = `Você é um assistente de vendas especializado em Telecomunicações e Energia em Portugal (Vodafone e Repsol).
 O seu papel é ajudar vendedores a ultrapassar objeções de clientes durante chamadas telefónicas.
 
 Regras:
@@ -268,16 +269,37 @@ Regras:
 - Sugira frases exatas que o vendedor pode usar
 - Mantenha um tom profissional mas empático
 - Foque na criação de valor, não apenas no preço
-- Mencione benefícios como: poupança, qualidade de serviço, fidelização sem compromisso, apoio técnico dedicado`;
+- Mencione benefícios como: poupança, qualidade de serviço, fidelização sem compromisso, apoio técnico dedicado
+- Produtos: Vodafone (fibra, móvel, TV) e Repsol (eletricidade, gás, combustível com desconto)`;
 
-        const response = await invokeLLM({
+        try {
+          // Try Manus LLM first
+          const response = await invokeLLM({
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: `O cliente disse: "${input.objection}"\n\nComo devo responder para ultrapassar esta objeção?` },
+            ],
+          });
+          const content = response.choices?.[0]?.message?.content || "";
+          if (content) return { response: content };
+        } catch (e) {
+          // Fallback to OpenAI
+        }
+
+        // Fallback: OpenAI
+        const openaiKey = process.env.OPENAI_API_KEY;
+        if (!openaiKey) {
+          return { response: "IA indisponível. Configure a chave OPENAI_API_KEY no servidor." };
+        }
+        const openai = new OpenAI({ apiKey: openaiKey });
+        const completion = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: `O cliente disse: "${input.objection}"\n\nComo devo responder para ultrapassar esta objeção?` },
           ],
         });
-
-        const content = response.choices?.[0]?.message?.content || "Não foi possível gerar uma resposta. Tente novamente.";
+        const content = completion.choices?.[0]?.message?.content || "Não foi possível gerar uma resposta.";
         return { response: content };
       }),
   }),
