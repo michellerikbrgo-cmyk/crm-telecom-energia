@@ -21,15 +21,33 @@ import {
 } from "@/components/ui/sidebar";
 import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { Button } from "./ui/button";
 
-const menuItems = [
-  { icon: LayoutDashboard, label: "Page 1", path: "/" },
-  { icon: Users, label: "Page 2", path: "/some-path" },
+type MenuItem = {
+  icon: any;
+  label: string;
+  path: string;
+  roles?: string[];
+};
+
+const menuItems: MenuItem[] = [
+  { icon: LayoutDashboard, label: "Dashboard", path: "/", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Phone, label: "Contactos", path: "/contactos", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: FileText, label: "Contratos", path: "/contratos", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Calculator, label: "Calculadora", path: "/calculadora", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Bot, label: "IA Objeções", path: "/ia-objecoes", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Megaphone, label: "Campanhas", path: "/campanhas", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Trophy, label: "Ranking", path: "/ranking", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Calendar, label: "Calendário", path: "/calendario", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: BarChart3, label: "Relatórios", path: "/relatorios", roles: ["cej", "ce", "coordenador"] },
+  { icon: Users, label: "Equipa", path: "/equipa", roles: ["cej", "ce", "coordenador"] },
+  { icon: Shield, label: "Auditoria", path: "/auditoria", roles: ["ce", "coordenador"] },
+  { icon: Zap, label: "Base de Dados", path: "/base-dados", roles: ["ce", "coordenador"] },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -62,10 +80,10 @@ export default function DashboardLayout({
         <div className="flex flex-col items-center gap-8 p-8 max-w-md w-full">
           <div className="flex flex-col items-center gap-6">
             <h1 className="text-2xl font-semibold tracking-tight text-center">
-              Sign in to continue
+              Iniciar Sessão
             </h1>
             <p className="text-sm text-muted-foreground text-center max-w-sm">
-              Access to this dashboard requires authentication. Continue to launch the login flow.
+              Aceda ao CRM da sua equipa de vendas. Autentique-se para continuar.
             </p>
           </div>
           <Button
@@ -75,7 +93,7 @@ export default function DashboardLayout({
             size="lg"
             className="w-full shadow-lg hover:shadow-xl transition-all"
           >
-            Sign in
+            Entrar
           </Button>
         </div>
       </div>
@@ -112,7 +130,9 @@ function DashboardLayoutContent({
   const isCollapsed = state === "collapsed";
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
-  const activeMenuItem = menuItems.find(item => item.path === location);
+  const userCrmRole = (user as any)?.crmRole || "vendedor";
+  const filteredMenuItems = menuItems.filter(item => !item.roles || item.roles.includes(userCrmRole));
+  const activeMenuItem = filteredMenuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
 
   useEffect(() => {
@@ -170,8 +190,8 @@ function DashboardLayoutContent({
               </button>
               {!isCollapsed ? (
                 <div className="flex items-center gap-2 min-w-0">
-                  <span className="font-semibold tracking-tight truncate">
-                    Navigation
+                  <span className="font-semibold tracking-tight truncate text-primary">
+                    CRM Pro
                   </span>
                 </div>
               ) : null}
@@ -180,7 +200,7 @@ function DashboardLayoutContent({
 
           <SidebarContent className="gap-0">
             <SidebarMenu className="px-2 py-1">
-              {menuItems.map(item => {
+              {filteredMenuItems.map(item => {
                 const isActive = location === item.path;
                 return (
                   <SidebarMenuItem key={item.path}>
@@ -226,7 +246,7 @@ function DashboardLayoutContent({
                   className="cursor-pointer text-destructive focus:text-destructive"
                 >
                   <LogOut className="mr-2 h-4 w-4" />
-                  <span>Sign out</span>
+                  <span>Terminar Sessão</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
