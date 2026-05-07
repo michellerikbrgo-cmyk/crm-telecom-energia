@@ -72,3 +72,10 @@
 - [ ] Envio de formulários por e-mail diretamente do sistema
 - [x] Página de Relatórios com métricas reais (chamadas por vendedor, conversão, etc.)
 - [x] Configurar pré-visualização como CE/Coordenador para acesso total
+
+## Fase 9 - Ajustes Pedidos
+- [x] Simulador: adicionar todas as potências (3.45, 4.6, 5.75, 6.9, 10.35, 13.8, 17.25, 20.7 kVA)
+- [x] Simulador: configuração de preço kWh editável apenas pelo CO
+- [x] Contactos: vendedor só vê os contactos atribuídos no dia (não todo o banco)
+- [x] Contactos: apenas CE vê todo o banco de dados
+- [x] Campanhas: upload de PDF com visualização/download direto (estrutura preparada)

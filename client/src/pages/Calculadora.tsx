@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Calculator, TrendingDown, Zap, Settings, Fuel, Flame } from "lucide-react";
+import { Calculator, TrendingDown, Zap, Settings, Fuel, Flame, Save } from "lucide-react";
 import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
@@ -15,7 +15,16 @@ import { toast } from "sonner";
 export default function Calculadora() {
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
-  const canConfig = ["ce", "coordenador"].includes(crmRole);
+  const canConfig = crmRole === "coordenador";
+
+  const [configKwh, setConfigKwh] = useState("");
+  const updateConfigMutation = trpc.energy.updateConfig.useMutation({
+    onSuccess: () => {
+      toast.success("Preço do kWh atualizado!");
+      configQuery.refetch();
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
 
   // Mode: luz or dual
   const [mode, setMode] = useState<"luz" | "dual">("luz");
@@ -41,8 +50,12 @@ export default function Calculadora() {
   const [descServicos, setDescServicos] = useState(false);
 
   // Config values (defaults from the simulator)
-  const baseKwh = 0.1850;
-  const fixos: Record<string, number> = { "3.45": 0.2918, "4.60": 0.4491, "6.90": 0.5636 };
+  const configQuery = trpc.energy.getConfig.useQuery();
+  const baseKwh = configQuery.data ? parseFloat(configQuery.data.priceKwhSimples) : 0.1850;
+  const fixos: Record<string, number> = {
+    "3.45": 0.2918, "4.60": 0.4491, "5.75": 0.5200, "6.90": 0.5636,
+    "10.35": 0.7800, "13.80": 1.0400, "17.25": 1.3000, "20.70": 1.5600,
+  };
   const gasConfig = { fixo1: 0.1746, kwh1: 0.112825, fixo2: 0.2087, kwh2: 0.108733 };
 
   const result = useMemo(() => {
@@ -171,7 +184,12 @@ export default function Calculadora() {
                       <SelectContent>
                         <SelectItem value="3.45">3,45 kVA</SelectItem>
                         <SelectItem value="4.60">4,60 kVA</SelectItem>
+                        <SelectItem value="5.75">5,75 kVA</SelectItem>
                         <SelectItem value="6.90">6,90 kVA</SelectItem>
+                        <SelectItem value="10.35">10,35 kVA</SelectItem>
+                        <SelectItem value="13.80">13,80 kVA</SelectItem>
+                        <SelectItem value="17.25">17,25 kVA</SelectItem>
+                        <SelectItem value="20.70">20,70 kVA</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -353,6 +371,51 @@ export default function Calculadora() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Config for CO */}
+            {canConfig && (
+              <Card className="border-0 shadow-sm border-l-4 border-l-primary">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Settings className="h-4 w-4" />
+                    Configuração (Coordenador)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="space-y-1">
+                    <Label className="text-xs">Preço Base Energia (€/kWh)</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        step="0.0001"
+                        placeholder={String(baseKwh)}
+                        value={configKwh}
+                        onChange={(e) => setConfigKwh(e.target.value)}
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          if (!configKwh) return;
+                          updateConfigMutation.mutate({
+                            priceKwhSimples: configKwh,
+                            priceKwhBiHorariaPonta: configKwh,
+                            priceKwhBiHorariaVazio: configKwh,
+                            baseDiscountPercent: "23",
+                            vdfClientExtraPercent: "2",
+                            vdfGasClientExtraPercent: "3",
+                            reembolsoPercent: "3",
+                          });
+                        }}
+                        disabled={updateConfigMutation.isPending}
+                      >
+                        <Save className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">Atual: {baseKwh} €/kWh</p>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
             {/* Extra Benefits */}
             <Card className="border-0 shadow-sm">

@@ -41,11 +41,18 @@ export const appRouter = router({
           conditions.push(eq(contacts.status, input.status as any));
         }
 
-        // Vendedores só veem os seus contactos
+        // Vendedores só veem os contactos atribuídos a eles no dia
         const user = ctx.user as any;
         if (user?.crmRole === "vendedor") {
+          const today = new Date();
+          today.setHours(0, 0, 0, 0);
           conditions.push(eq(contacts.assignedTo, user.id));
+          conditions.push(sql`${contacts.lastAssignedAt} >= ${today}`);
+        } else if (user?.crmRole === "cej") {
+          // CEJ vê os contactos da sua equipa (por agora, vê os atribuídos)
+          // Futuramente filtrar por teamId
         }
+        // CE e CO veem tudo (sem filtro adicional)
 
         if (conditions.length > 0) {
           query = query.where(and(...conditions)) as any;
@@ -629,7 +636,7 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
-        if (!['ce', 'coordenador'].includes(user?.crmRole)) throw new Error("Sem permissão");
+        if (user?.crmRole !== 'coordenador') throw new Error("Apenas o Coordenador pode alterar a configuração");
         await db.update(energyConfig).set({
           ...input,
           updatedBy: user?.id,
