@@ -65,3 +65,10 @@
 - [ ] Edição manual dos formulários em caso de erro
 - [x] Simulador de Energia configurável (preço kWh, potências, descontos %)
 - [x] Lógica de desconto: base 23% + 2-3% se cliente VDF
+
+## Fase 8 - Melhorias e Novas Funcionalidades
+- [x] Melhorar simulador de energia com modelo completo (débito direto, combustível, desconto máximo)
+- [ ] Formulários editáveis no browser com exportação para PDF
+- [ ] Envio de formulários por e-mail diretamente do sistema
+- [x] Página de Relatórios com métricas reais (chamadas por vendedor, conversão, etc.)
+- [x] Configurar pré-visualização como CE/Coordenador para acesso total
