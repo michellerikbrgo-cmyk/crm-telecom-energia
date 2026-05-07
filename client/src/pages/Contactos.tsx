@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Phone, Plus, Search, Filter, UserPlus } from "lucide-react";
+import { Phone, Plus, Search, Filter, UserPlus, PhoneCall, PhoneOff } from "lucide-react";
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
@@ -27,6 +27,24 @@ export default function Contactos() {
   });
 
   const contactsQuery = trpc.contacts.list.useQuery({ search, status: statusFilter });
+  const nextContactQuery = trpc.distribution.getNext.useQuery(undefined, { enabled: false });
+  const logCallMutation = trpc.calls.log.useMutation({
+    onSuccess: () => {
+      toast.success("Chamada registada!");
+      contactsQuery.refetch();
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const handleGetNext = async () => {
+    const result = await nextContactQuery.refetch();
+    if (result.data) {
+      toast.success(`Contacto atribuído: ${result.data.phone}`);
+      contactsQuery.refetch();
+    } else {
+      toast.info("Não há contactos disponíveis de momento.");
+    }
+  };
   const addContactMutation = trpc.contacts.add.useMutation({
     onSuccess: () => {
       toast.success("Contacto adicionado com sucesso!");
@@ -65,13 +83,18 @@ export default function Contactos() {
             <h1 className="text-2xl font-bold tracking-tight">Contactos</h1>
             <p className="text-muted-foreground">Gerir a sua lista de contactos</p>
           </div>
-          <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
-            <DialogTrigger asChild>
-              <Button className="gap-2">
-                <UserPlus className="h-4 w-4" />
-                Adicionar Contacto
-              </Button>
-            </DialogTrigger>
+          <div className="flex gap-2">
+            <Button variant="outline" className="gap-2" onClick={handleGetNext}>
+              <PhoneCall className="h-4 w-4" />
+              Próximo Contacto
+            </Button>
+            <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
+              <DialogTrigger asChild>
+                <Button className="gap-2">
+                  <UserPlus className="h-4 w-4" />
+                  Adicionar Contacto
+                </Button>
+              </DialogTrigger>
             <DialogContent>
               <DialogHeader>
                 <DialogTitle>Novo Contacto</DialogTitle>
@@ -133,7 +156,8 @@ export default function Contactos() {
                 </Button>
               </div>
             </DialogContent>
-          </Dialog>
+            </Dialog>
+          </div>
         </div>
 
         {/* Filters */}

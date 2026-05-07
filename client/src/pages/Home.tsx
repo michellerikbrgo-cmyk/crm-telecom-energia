@@ -10,6 +10,9 @@ import { toast } from "sonner";
 export default function Home() {
   const { user } = useAuth();
 
+  const statsQuery = trpc.dashboard.stats.useQuery();
+  const stats = statsQuery.data || { callsToday: 0, pendentesToday: 0, salesMonth: 0, totalContacts: 0 };
+
   const sosMutation = trpc.sos.create.useMutation({
     onSuccess: () => toast.success("SOS enviado! O seu chefe foi notificado."),
     onError: () => toast.error("Erro ao enviar SOS. Tente novamente."),
@@ -51,7 +54,7 @@ export default function Home() {
               <Phone className="h-4 w-4 text-primary" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold">0</div>
+              <div className="text-3xl font-bold">{stats.callsToday}</div>
               <p className="text-xs text-muted-foreground mt-1">
                 Meta diária: 80
               </p>
@@ -66,7 +69,7 @@ export default function Home() {
               <Clock className="h-4 w-4 text-chart-3" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold">0</div>
+              <div className="text-3xl font-bold">{stats.pendentesToday}</div>
               <p className="text-xs text-muted-foreground mt-1">
                 Agendados para hoje
               </p>
@@ -81,7 +84,7 @@ export default function Home() {
               <TrendingUp className="h-4 w-4 text-chart-2" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold">0</div>
+              <div className="text-3xl font-bold">{stats.salesMonth}</div>
               <p className="text-xs text-muted-foreground mt-1">
                 Telecom + Energia
               </p>

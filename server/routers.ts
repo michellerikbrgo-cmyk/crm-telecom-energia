@@ -306,6 +306,274 @@ Regras:
       }),
   }),
 
+  // ============ DASHBOARD ============
+  dashboard: router({
+    stats: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return { callsToday: 0, pendentesToday: 0, salesMonth: 0, totalContacts: 0 };
+      const user = ctx.user as any;
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      // Calls today
+      let callsResult;
+      if (user?.crmRole === "vendedor") {
+        callsResult = await db.select({ count: sql<number>`COUNT(*)` }).from(callLogs)
+          .where(and(eq(callLogs.vendedorId, user.id), sql`${callLogs.calledAt} >= ${today}`));
+      } else {
+        callsResult = await db.select({ count: sql<number>`COUNT(*)` }).from(callLogs)
+          .where(sql`${callLogs.calledAt} >= ${today}`);
+      }
+
+      // Pendentes for today
+      const tomorrow = new Date(today);
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      let pendentesResult;
+      if (user?.crmRole === "vendedor") {
+        pendentesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
+          .where(and(
+            eq(pendentes.vendedorId, user.id),
+            eq(pendentes.status, "agendado"),
+            sql`${pendentes.returnDate} >= ${today}`,
+            sql`${pendentes.returnDate} < ${tomorrow}`
+          ));
+      } else {
+        pendentesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
+          .where(and(
+            eq(pendentes.status, "agendado"),
+            sql`${pendentes.returnDate} >= ${today}`,
+            sql`${pendentes.returnDate} < ${tomorrow}`
+          ));
+      }
+
+      // Sales this month
+      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+      let salesResult;
+      if (user?.crmRole === "vendedor") {
+        salesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(sales)
+          .where(and(eq(sales.vendedorId, user.id), sql`${sales.closedAt} >= ${monthStart}`));
+      } else {
+        salesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(sales)
+          .where(sql`${sales.closedAt} >= ${monthStart}`);
+      }
+
+      return {
+        callsToday: callsResult[0]?.count || 0,
+        pendentesToday: pendentesResult[0]?.count || 0,
+        salesMonth: salesResult[0]?.count || 0,
+        totalContacts: 0,
+      };
+    }),
+  }),
+
+  // ============ DISTRIBUTION ============
+  distribution: router({
+    getNext: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return null;
+      const user = ctx.user as any;
+
+      // Get next available contact not assigned in last 30 days
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+      const result = await db.select().from(contacts)
+        .where(
+          and(
+            eq(contacts.status, "novo"),
+            or(
+              sql`${contacts.lastAssignedAt} IS NULL`,
+              sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`
+            )
+          )
+        )
+        .limit(1);
+
+      if (result.length === 0) return null;
+
+      const contact = result[0];
+      // Assign to current user
+      await db.update(contacts).set({
+        assignedTo: user?.id,
+        lastAssignedAt: new Date(),
+        status: "em_contacto",
+      }).where(eq(contacts.id, contact.id));
+
+      return contact;
+    }),
+
+    repescagem: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      // Get contacts that didn't answer after 3+ attempts
+      return await db.select().from(contacts)
+        .where(
+          and(
+            eq(contacts.status, "nao_atende"),
+            sql`${contacts.attempts} >= 3`
+          )
+        )
+        .orderBy(desc(contacts.lastAttemptAt))
+        .limit(20);
+    }),
+  }),
+
+  // ============ BLACKLIST ============
+  blacklist: router({
+    add: protectedProcedure
+      .input(z.object({ phone: z.string(), reason: z.string().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        await db.insert(blacklist).values({
+          phone: input.phone,
+          reason: input.reason || null,
+          addedBy: user?.id,
+        });
+
+        // Update contact status
+        await db.update(contacts)
+          .set({ status: "blacklist" })
+          .where(eq(contacts.phone, input.phone));
+
+        return { success: true };
+      }),
+  }),
+
+  // ============ GAMIFICATION ============
+  gamification: router({
+    ranking: protectedProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return [];
+      const now = new Date();
+      return await db.select().from(gamification)
+        .where(
+          and(
+            eq(gamification.month, now.getMonth() + 1),
+            eq(gamification.year, now.getFullYear())
+          )
+        )
+        .orderBy(desc(gamification.points))
+        .limit(20);
+    }),
+  }),
+
+  // ============ AUDIT ============
+  audit: router({
+    list: protectedProcedure
+      .input(z.object({ limit: z.number().default(50) }).optional())
+      .query(async ({ input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        return await db.select().from(auditLogs)
+          .orderBy(desc(auditLogs.createdAt))
+          .limit(input?.limit || 50);
+      }),
+  }),
+
+  // ============ COMPETITOR SCRIPTS ============
+  scripts: router({
+    list: protectedProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return [];
+      return await db.select().from(competitorScripts)
+        .orderBy(desc(competitorScripts.createdAt));
+    }),
+    create: protectedProcedure
+      .input(z.object({
+        competitor: z.string().min(1),
+        weakness: z.string().min(1),
+        ourStrength: z.string().min(1),
+        product: z.enum(["telecom", "energia", "ambos"]).default("ambos"),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        await db.insert(competitorScripts).values({
+          competitor: input.competitor,
+          weakness: input.weakness,
+          ourStrength: input.ourStrength,
+          product: input.product,
+          createdBy: user?.id,
+        });
+
+        return { success: true };
+      }),
+  }),
+
+  // ============ SALES ============
+  sales: router({
+    list: protectedProcedure
+      .input(z.object({ month: z.number().optional(), year: z.number().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+        const now = new Date();
+        const month = input?.month || (now.getMonth() + 1);
+        const year = input?.year || now.getFullYear();
+
+        let conditions: any[] = [
+          sql`MONTH(${sales.closedAt}) = ${month}`,
+          sql`YEAR(${sales.closedAt}) = ${year}`,
+        ];
+
+        if (user?.crmRole === "vendedor") {
+          conditions.push(eq(sales.vendedorId, user.id));
+        }
+
+        return await db.select().from(sales)
+          .where(and(...conditions))
+          .orderBy(desc(sales.closedAt));
+      }),
+
+    create: protectedProcedure
+      .input(z.object({
+        contactId: z.number(),
+        product: z.enum(["telecom", "energia"]),
+        offer: z.string().optional(),
+        value: z.string().optional(),
+        installationDate: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        await db.insert(sales).values({
+          contactId: input.contactId,
+          vendedorId: user?.id,
+          product: input.product,
+          offer: input.offer || null,
+          value: input.value || null,
+          installationDate: input.installationDate ? new Date(input.installationDate) : null,
+          status: "pendente_instalacao",
+        });
+
+        // Update contact status
+        await db.update(contacts)
+          .set({
+            status: "venda",
+            ...(input.product === "telecom" ? { hasTelecom: true } : { hasEnergy: true }),
+          })
+          .where(eq(contacts.id, input.contactId));
+
+        // Log audit
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "sale_created",
+          entity: "sale",
+          details: `Venda ${input.product} para contacto #${input.contactId}`,
+        });
+
+        return { success: true };
+      }),
+  }),
+
   // ============ SOS ============
   sos: router({
     create: protectedProcedure
