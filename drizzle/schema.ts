@@ -50,6 +50,9 @@ export const contacts = mysqlTable("contacts", {
   hasTelecom: boolean("hasTelecom").default(false).notNull(),
   lossReason: varchar("lossReason", { length: 100 }),
   notes: text("notes"),
+  campaignOffered: varchar("campaignOffered", { length: 255 }),
+  offerValue: varchar("offerValue", { length: 100 }),
+  listName: varchar("listName", { length: 255 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -161,7 +164,8 @@ export const sales = mysqlTable("sales", {
   product: mysqlEnum("product", ["telecom", "energia"]).notNull(),
   offer: text("offer"),
   value: text("value"),
-  status: mysqlEnum("status", ["pendente_instalacao", "instalado", "cancelado"]).default("pendente_instalacao").notNull(),
+  status: mysqlEnum("status", ["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).default("aguarda_instalacao").notNull(),
+  cancelReason: text("cancelReason"),
   installationDate: timestamp("installationDate"),
   closedAt: timestamp("closedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -205,6 +209,28 @@ export const energyCalculations = mysqlTable("energyCalculations", {
   ourOffer: text("ourOffer"),
   estimatedSavings: text("estimatedSavings"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+// ============ CONTACT ORIGINS ============
+export const contactOrigins = mysqlTable("contactOrigins", {
+  id: int("id").autoincrement().primaryKey(),
+  name: varchar("name", { length: 100 }).notNull().unique(),
+  createdBy: int("createdBy").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+// ============ ENERGY CONFIG ============
+export const energyConfig = mysqlTable("energyConfig", {
+  id: int("id").autoincrement().primaryKey(),
+  priceKwhSimples: text("priceKwhSimples").default("0.1500").notNull(),
+  priceKwhBiHorariaPonta: text("priceKwhBiHorariaPonta").default("0.2000").notNull(),
+  priceKwhBiHorariaVazio: text("priceKwhBiHorariaVazio").default("0.1000").notNull(),
+  baseDiscountPercent: text("baseDiscountPercent").default("23.00").notNull(),
+  vdfClientExtraPercent: text("vdfClientExtraPercent").default("2.00").notNull(),
+  vdfGasClientExtraPercent: text("vdfGasClientExtraPercent").default("3.00").notNull(),
+  reembolsoPercent: text("reembolsoPercent").default("3.00").notNull(),
+  updatedBy: int("updatedBy"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
 // ============ SOS REQUESTS ============

@@ -48,3 +48,20 @@
 - [x] Campo de Motivo de Perda com opções pré-definidas
 - [x] Blacklist interna de contactos
 - [x] Testes unitários (vitest)
+
+## Fase 7 - Novas Funcionalidades (Pedido do Utilizador)
+- [x] Upload de lista Excel (.xlsx) com seleção de coluna telefone e nomes
+- [x] Atribuição de listas a vendedores específicos (CO/CE/CEJ)
+- [x] Novos campos no contacto: código postal, morada, campanha oferecida, valor
+- [x] Vendas separadas Telecom vs Energia com estados diferentes
+- [x] Estados Telecom: Aguarda Instalação, Em Aberto, Activo, Cancelado
+- [x] Estados Energia: Aguarda Instalação, Em Aberto, E-Switch, Cancelado
+- [x] Campo motivo de cancelamento manual
+- [x] Visibilidade de vendas por hierarquia (vendedor→CEJ→CE→CO)
+- [x] Campanhas com data de fim e marcação "Expirada"
+- [x] Gestão de origens (CEJ/CE/CO podem criar/editar, vendedores não)
+- [x] Origens pré-definidas: Telemarketing, Rua, Indicação
+- [ ] Formulários automáticos: Contrato, Portabilidade Fixa, Portabilidade Móvel, Alt. Titularidade, Desativação
+- [ ] Edição manual dos formulários em caso de erro
+- [x] Simulador de Energia configurável (preço kWh, potências, descontos %)
+- [x] Lógica de desconto: base 23% + 2-3% se cliente VDF

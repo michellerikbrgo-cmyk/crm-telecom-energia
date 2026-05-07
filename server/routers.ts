@@ -4,7 +4,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { getDb } from "./db";
-import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification } from "../drizzle/schema";
+import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification, contactOrigins, energyConfig } from "../drizzle/schema";
 import { eq, desc, and, sql, like, or } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
 
@@ -89,26 +89,39 @@ export const appRouter = router({
       }),
 
     bulkAdd: protectedProcedure
-      .input(z.object({ phones: z.array(z.string()) }))
+      .input(z.object({
+        phones: z.array(z.string()),
+        names: z.array(z.string()).optional(),
+        listName: z.string().optional(),
+        assignTo: z.number().optional(),
+      }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
-        const values = input.phones.map(phone => ({
+        const values = input.phones.map((phone, i) => ({
           phone,
+          name: input.names?.[i] || null,
           origin: "Telemarketing",
           status: "novo" as const,
           addedBy: user?.id,
+          listName: input.listName || null,
+          assignedTo: input.assignTo || null,
+          lastAssignedAt: input.assignTo ? new Date() : null,
         }));
 
-        await db.insert(contacts).values(values);
+        // Insert in batches of 500 to avoid query limits
+        for (let i = 0; i < values.length; i += 500) {
+          const batch = values.slice(i, i + 500);
+          await db.insert(contacts).values(batch);
+        }
 
         await db.insert(auditLogs).values({
           userId: user?.id,
           action: "bulk_create",
           entity: "contact",
-          details: `Adicionou ${input.phones.length} contactos em massa`,
+          details: `Adicionou ${input.phones.length} contactos${input.listName ? ` (Lista: ${input.listName})` : ''}${input.assignTo ? ` atribuídos ao vendedor #${input.assignTo}` : ''}`,
         });
 
         return { count: input.phones.length };
@@ -551,7 +564,7 @@ Regras:
           offer: input.offer || null,
           value: input.value || null,
           installationDate: input.installationDate ? new Date(input.installationDate) : null,
-          status: "pendente_instalacao",
+          status: "aguarda_instalacao",
         });
 
         // Update contact status
@@ -570,6 +583,57 @@ Regras:
           details: `Venda ${input.product} para contacto #${input.contactId}`,
         });
 
+        return { success: true };
+      }),
+  }),
+
+  // ============ ORIGINS ============
+  origins: router({
+    list: protectedProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return [];
+      return await db.select().from(contactOrigins).orderBy(contactOrigins.name);
+    }),
+    create: protectedProcedure
+      .input(z.object({ name: z.string().min(1) }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        // Only CEJ/CE/CO can manage origins
+        if (user?.crmRole === "vendedor") throw new Error("Sem permissão");
+        await db.insert(contactOrigins).values({ name: input.name, createdBy: user?.id });
+        return { success: true };
+      }),
+  }),
+
+  // ============ ENERGY CONFIG ============
+  energy: router({
+    getConfig: protectedProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) return null;
+      const result = await db.select().from(energyConfig).limit(1);
+      return result[0] || null;
+    }),
+    updateConfig: protectedProcedure
+      .input(z.object({
+        priceKwhSimples: z.string(),
+        priceKwhBiHorariaPonta: z.string(),
+        priceKwhBiHorariaVazio: z.string(),
+        baseDiscountPercent: z.string(),
+        vdfClientExtraPercent: z.string(),
+        vdfGasClientExtraPercent: z.string(),
+        reembolsoPercent: z.string(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (!['ce', 'coordenador'].includes(user?.crmRole)) throw new Error("Sem permissão");
+        await db.update(energyConfig).set({
+          ...input,
+          updatedBy: user?.id,
+        }).where(eq(energyConfig.id, 1));
         return { success: true };
       }),
   }),

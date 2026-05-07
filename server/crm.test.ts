@@ -91,6 +91,16 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("dashboard.stats");
   });
 
+  it("should have origins router with list and create", () => {
+    expect(appRouter._def.procedures).toHaveProperty("origins.list");
+    expect(appRouter._def.procedures).toHaveProperty("origins.create");
+  });
+
+  it("should have energy router with getConfig and updateConfig", () => {
+    expect(appRouter._def.procedures).toHaveProperty("energy.getConfig");
+    expect(appRouter._def.procedures).toHaveProperty("energy.updateConfig");
+  });
+
   it("should have auth router with me and logout", () => {
     expect(appRouter._def.procedures).toHaveProperty("auth.me");
     expect(appRouter._def.procedures).toHaveProperty("auth.logout");
