@@ -4,18 +4,9 @@ import { getDb } from "./db";
 import { users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
 import bcrypt from "bcryptjs";
-import { SignJWT, jwtVerify } from "jose";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
-
-const JWT_SECRET_KEY = new TextEncoder().encode(process.env.JWT_SECRET || "crm-telecom-secret-2026");
-
-async function createToken(userId: number, email: string) {
-  return await new SignJWT({ userId, email })
-    .setProtectedHeader({ alg: "HS256" })
-    .setExpirationTime("30d")
-    .sign(JWT_SECRET_KEY);
-}
+import { sdk } from "./_core/sdk";
 
 export const authLocalRouter = router({
   login: publicProcedure
@@ -45,8 +36,8 @@ export const authLocalRouter = router({
         throw new Error("E-mail ou senha incorretos");
       }
 
-      // Create JWT token and set cookie
-      const token = await createToken(user.id, user.email || "");
+      // Create session token using SDK (same format as OAuth)
+      const token = await sdk.createSessionToken(user.openId, { name: user.name || "" });
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.cookie(COOKIE_NAME, token, { ...cookieOptions, maxAge: 30 * 24 * 60 * 60 * 1000 });
 
