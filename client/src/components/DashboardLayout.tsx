@@ -19,7 +19,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
-import { getLoginUrl } from "@/const";
+// import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
 import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
@@ -48,6 +48,7 @@ const menuItems: MenuItem[] = [
   { icon: Users, label: "Equipa", path: "/equipa", roles: ["cej", "ce", "coordenador"] },
   { icon: Shield, label: "Auditoria", path: "/auditoria", roles: ["ce", "coordenador"] },
   { icon: Zap, label: "Base de Dados", path: "/base-dados", roles: ["ce", "coordenador"] },
+  { icon: Users, label: "Utilizadores", path: "/utilizadores", roles: ["ce", "coordenador"] },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -88,7 +89,7 @@ export default function DashboardLayout({
           </div>
           <Button
             onClick={() => {
-              window.location.href = getLoginUrl();
+              window.location.href = "/login";
             }}
             size="lg"
             className="w-full shadow-lg hover:shadow-xl transition-all"

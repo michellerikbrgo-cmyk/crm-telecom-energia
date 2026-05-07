@@ -79,3 +79,11 @@
 - [x] Contactos: vendedor só vê os contactos atribuídos no dia (não todo o banco)
 - [x] Contactos: apenas CE vê todo o banco de dados
 - [x] Campanhas: upload de PDF com visualização/download direto (estrutura preparada)
+
+## Fase 10 - Login Próprio e Gestão de Utilizadores
+- [ ] Sistema de login próprio com e-mail e senha (sem Manus OAuth)
+- [ ] Hash de senhas com bcrypt
+- [ ] CO pode criar CE, CEJ e Vendedores
+- [ ] CE pode criar CEJ e Vendedores
+- [ ] Página de gestão de utilizadores
+- [ ] Deploy atualizado no VPS

@@ -17,6 +17,8 @@ import Relatorios from "./pages/Relatorios";
 import Equipa from "./pages/Equipa";
 import Auditoria from "./pages/Auditoria";
 import BaseDados from "./pages/BaseDados";
+import Login from "./pages/Login";
+import GestaoUtilizadores from "./pages/GestaoUtilizadores";
 
 function Router() {
   return (
@@ -34,6 +36,8 @@ function Router() {
       <Route path={"/equipa"} component={Equipa} />
       <Route path={"/auditoria"} component={Auditoria} />
       <Route path={"/base-dados"} component={BaseDados} />
+      <Route path={"/login"} component={Login} />
+      <Route path={"/utilizadores"} component={GestaoUtilizadores} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>

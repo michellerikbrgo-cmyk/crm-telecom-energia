@@ -3,6 +3,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
+import { authLocalRouter } from "./authLocal";
 import { getDb } from "./db";
 import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification, contactOrigins, energyConfig } from "../drizzle/schema";
 import { eq, desc, and, sql, like, or } from "drizzle-orm";
@@ -18,6 +19,8 @@ export const appRouter = router({
       return { success: true } as const;
     }),
   }),
+
+  authLocal: authLocalRouter,
 
   // ============ CONTACTS ============
   contacts: router({

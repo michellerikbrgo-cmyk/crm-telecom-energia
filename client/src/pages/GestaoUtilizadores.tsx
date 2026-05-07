@@ -1,0 +1,170 @@
+import DashboardLayout from "@/components/DashboardLayout";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Users, UserPlus, Shield } from "lucide-react";
+import { useState } from "react";
+import { trpc } from "@/lib/trpc";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { toast } from "sonner";
+
+export default function GestaoUtilizadores() {
+  const { user } = useAuth();
+  const crmRole = (user as any)?.crmRole || "vendedor";
+  const [showDialog, setShowDialog] = useState(false);
+  const [newUser, setNewUser] = useState({
+    name: "",
+    email: "",
+    password: "",
+    crmRole: "vendedor",
+  });
+
+  const usersQuery = trpc.authLocal.listUsers.useQuery();
+  const registerMutation = trpc.authLocal.register.useMutation({
+    onSuccess: () => {
+      toast.success("Utilizador criado com sucesso!");
+      setShowDialog(false);
+      setNewUser({ name: "", email: "", password: "", crmRole: "vendedor" });
+      usersQuery.refetch();
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const roleLabels: Record<string, string> = {
+    vendedor: "Vendedor",
+    cej: "Chefe Equipa Jr.",
+    ce: "Chefe de Equipa",
+    coordenador: "Coordenador",
+  };
+
+  const roleColors: Record<string, string> = {
+    vendedor: "bg-blue-100 text-blue-700",
+    cej: "bg-orange-100 text-orange-700",
+    ce: "bg-purple-100 text-purple-700",
+    coordenador: "bg-red-100 text-red-700",
+  };
+
+  // Roles that current user can create
+  const allowedRoles = crmRole === "coordenador"
+    ? ["vendedor", "cej", "ce", "coordenador"]
+    : crmRole === "ce"
+    ? ["vendedor", "cej"]
+    : [];
+
+  return (
+    <DashboardLayout>
+      <div className="space-y-6">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Gestão de Utilizadores</h1>
+            <p className="text-muted-foreground">Criar e gerir os acessos da equipa</p>
+          </div>
+          {allowedRoles.length > 0 && (
+            <Dialog open={showDialog} onOpenChange={setShowDialog}>
+              <DialogTrigger asChild>
+                <Button className="gap-2">
+                  <UserPlus className="h-4 w-4" />
+                  Novo Utilizador
+                </Button>
+              </DialogTrigger>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Criar Utilizador</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 pt-4">
+                  <div className="space-y-2">
+                    <Label>Nome Completo *</Label>
+                    <Input
+                      placeholder="Ex: João Silva"
+                      value={newUser.name}
+                      onChange={(e) => setNewUser({ ...newUser, name: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>E-mail *</Label>
+                    <Input
+                      type="email"
+                      placeholder="joao@empresa.com"
+                      value={newUser.email}
+                      onChange={(e) => setNewUser({ ...newUser, email: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Senha *</Label>
+                    <Input
+                      type="password"
+                      placeholder="Mínimo 6 caracteres"
+                      value={newUser.password}
+                      onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Cargo *</Label>
+                    <Select value={newUser.crmRole} onValueChange={(v) => setNewUser({ ...newUser, crmRole: v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {allowedRoles.map(role => (
+                          <SelectItem key={role} value={role}>{roleLabels[role]}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    className="w-full"
+                    onClick={() => registerMutation.mutate(newUser as any)}
+                    disabled={!newUser.name || !newUser.email || !newUser.password || registerMutation.isPending}
+                  >
+                    {registerMutation.isPending ? "A criar..." : "Criar Utilizador"}
+                  </Button>
+                </div>
+              </DialogContent>
+            </Dialog>
+          )}
+        </div>
+
+        <Card className="border-0 shadow-sm">
+          <CardContent className="p-0">
+            {usersQuery.isLoading ? (
+              <div className="flex items-center justify-center py-12">
+                <div className="animate-spin h-6 w-6 border-2 border-primary border-t-transparent rounded-full" />
+              </div>
+            ) : !usersQuery.data?.length ? (
+              <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
+                <Users className="h-12 w-12 mb-3 opacity-30" />
+                <p className="text-sm font-medium">Nenhum utilizador encontrado</p>
+              </div>
+            ) : (
+              <div className="divide-y">
+                {usersQuery.data.map((u: any) => (
+                  <div key={u.id} className="flex items-center justify-between p-4 hover:bg-accent/50 transition-colors">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
+                        <span className="text-sm font-bold text-primary">
+                          {u.name?.charAt(0)?.toUpperCase() || "?"}
+                        </span>
+                      </div>
+                      <div>
+                        <p className="font-medium">{u.name || "Sem nome"}</p>
+                        <p className="text-sm text-muted-foreground">{u.email}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge className={roleColors[u.crmRole] || ""}>
+                        {roleLabels[u.crmRole] || u.crmRole}
+                      </Badge>
+                      <div className={`h-2 w-2 rounded-full ${u.isOnline ? "bg-green-500" : "bg-gray-300"}`} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </DashboardLayout>
+  );
+}

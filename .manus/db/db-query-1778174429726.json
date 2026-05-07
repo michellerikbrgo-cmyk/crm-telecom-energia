@@ -1,0 +1,9 @@
+{
+  "query": "ALTER TABLE `users` ADD `password` varchar(255) AFTER `email`;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3uUfHQeHfLxHQGi.3bf92434ac09 --database 6TNHGLC92Amb2dHAMVFtzR --execute ALTER TABLE `users` ADD `password` varchar(255) AFTER `email`;",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 825
+}
