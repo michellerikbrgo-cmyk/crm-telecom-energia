@@ -82,15 +82,28 @@ export default function Contratos() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Tipo de Documento *</Label>
-                  <Select value={newContract.type} onValueChange={(v) => setNewContract({ ...newContract, type: v })}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="contrato">Contrato</SelectItem>
-                      <SelectItem value="portabilidade">Portabilidade</SelectItem>
-                      <SelectItem value="rescisao">Rescisão</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label>Documentos a Gerar *</Label>
+                  <div className="space-y-2 p-3 border rounded-lg">
+                    {[
+                      { value: "contrato", label: "Contrato de Adesão" },
+                      { value: "portabilidade_fixa", label: "Portabilidade Fixa" },
+                      { value: "portabilidade_movel", label: "Portabilidade Móvel" },
+                      { value: "alt_titularidade", label: "Alteração de Titularidade" },
+                      { value: "rescisao", label: "Rescisão / Desativação" },
+                    ].map((doc) => (
+                      <label key={doc.value} className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={(newContract.type as any)?.includes?.(doc.value) || newContract.type === doc.value}
+                          onChange={(e) => {
+                            setNewContract({ ...newContract, type: doc.value });
+                          }}
+                          className="accent-primary"
+                        />
+                        <span className="text-sm">{doc.label}</span>
+                      </label>
+                    ))}
+                  </div>
                 </div>
                 <div className="space-y-2">
                   <Label>Produto *</Label>

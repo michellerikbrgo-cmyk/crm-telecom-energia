@@ -87,3 +87,16 @@
 - [ ] CE pode criar CEJ e Vendedores
 - [ ] Página de gestão de utilizadores
 - [ ] Deploy atualizado no VPS
+
+## Fase 11 - Correção de Bugs Reportados
+- [ ] Contactos não aparecem para CE (corrigir filtro)
+- [ ] Contratos não aparecem após carregar BD
+- [ ] Meta diária editável (CE altera vendedor/CEJ, CO altera todos)
+- [ ] Pendentes: permitir criar sem depender de contactos do dia
+- [ ] Contratos por checkbox (Contrato, Port. Fixa, Port. Móvel, Alt. Tit., Rescisão)
+- [ ] E-mail configurável pelo CE (conectar e-mail, texto padrão, título)
+- [ ] Calculadora: valores zerados por defeito
+- [ ] IA não funciona no VPS (verificar API key)
+- [ ] Campanhas: upload/download de PDF
+- [ ] Calendário funcional
+- [ ] Tempo online e pausa funcional (limite 1h)

@@ -75,10 +75,11 @@ export default function Pendentes() {
                   <Label>ID do Contacto *</Label>
                   <Input
                     type="number"
-                    placeholder="Ex: 1"
+                    placeholder="Insira o ID do contacto"
                     value={newPendente.contactId}
                     onChange={(e) => setNewPendente({ ...newPendente, contactId: e.target.value })}
                   />
+                  <p className="text-xs text-muted-foreground">Pode ver o ID na lista de contactos</p>
                 </div>
                 <div className="space-y-2">
                   <Label>Data e Hora do Retorno *</Label>

@@ -5,7 +5,7 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { z } from "zod";
 import { authLocalRouter } from "./authLocal";
 import { getDb } from "./db";
-import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification, contactOrigins, energyConfig } from "../drizzle/schema";
+import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification, contactOrigins, energyConfig, users } from "../drizzle/schema";
 import { eq, desc, and, sql, like, or } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
 
@@ -44,18 +44,13 @@ export const appRouter = router({
           conditions.push(eq(contacts.status, input.status as any));
         }
 
-        // Vendedores só veem os contactos atribuídos a eles no dia
+        // Filtro por role
         const user = ctx.user as any;
         if (user?.crmRole === "vendedor") {
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
+          // Vendedor só vê os contactos atribuídos a ele
           conditions.push(eq(contacts.assignedTo, user.id));
-          conditions.push(sql`${contacts.lastAssignedAt} >= ${today}`);
-        } else if (user?.crmRole === "cej") {
-          // CEJ vê os contactos da sua equipa (por agora, vê os atribuídos)
-          // Futuramente filtrar por teamId
         }
-        // CE e CO veem tudo (sem filtro adicional)
+        // CEJ, CE e CO veem tudo
 
         if (conditions.length > 0) {
           query = query.where(and(...conditions)) as any;
@@ -595,6 +590,61 @@ Regras:
 
         return { success: true };
       }),
+  }),
+
+  // ============ SESSION / PAUSE ============
+  session: router({
+    goOnline: protectedProcedure.mutation(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const user = ctx.user as any;
+      await db.update(users).set({
+        isOnline: true,
+        lastOnlineAt: new Date(),
+        pauseStartedAt: null,
+      }).where(eq(users.id, user.id));
+      return { success: true };
+    }),
+    goOffline: protectedProcedure.mutation(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const user = ctx.user as any;
+      await db.update(users).set({
+        isOnline: false,
+      }).where(eq(users.id, user.id));
+      return { success: true };
+    }),
+    startPause: protectedProcedure.mutation(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const user = ctx.user as any;
+      await db.update(users).set({
+        pauseStartedAt: new Date(),
+      }).where(eq(users.id, user.id));
+      return { success: true };
+    }),
+    endPause: protectedProcedure.mutation(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const user = ctx.user as any;
+      // Get current pause start
+      const result = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
+      if (result[0]?.pauseStartedAt) {
+        const pauseMinutes = Math.floor((Date.now() - new Date(result[0].pauseStartedAt).getTime()) / 60000);
+        await db.update(users).set({
+          pauseStartedAt: null,
+          totalPauseMinutes: sql`totalPauseMinutes + ${pauseMinutes}`,
+        }).where(eq(users.id, user.id));
+      }
+      return { success: true };
+    }),
+    getStatus: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return null;
+      const user = ctx.user as any;
+      const result = await db.select().from(users).where(eq(users.id, user.id)).limit(1);
+      return result[0] || null;
+    }),
   }),
 
   // ============ ORIGINS ============

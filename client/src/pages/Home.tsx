@@ -3,9 +3,77 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Phone, Users, Clock, TrendingUp, AlertTriangle, Trophy, Zap } from "lucide-react";
+import { Phone, Users, Clock, TrendingUp, AlertTriangle, Trophy, Zap, Pause, Play } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import { useState, useEffect } from "react";
+
+function SessionBar() {
+  const sessionQuery = trpc.session.getStatus.useQuery(undefined, { refetchInterval: 30000 });
+  const startPause = trpc.session.startPause.useMutation({ onSuccess: () => sessionQuery.refetch() });
+  const endPause = trpc.session.endPause.useMutation({ onSuccess: () => sessionQuery.refetch() });
+  const goOnline = trpc.session.goOnline.useMutation({ onSuccess: () => sessionQuery.refetch() });
+
+  const [elapsed, setElapsed] = useState(0);
+  const [pauseElapsed, setPauseElapsed] = useState(0);
+  const isPaused = !!sessionQuery.data?.pauseStartedAt;
+  const isOnline = sessionQuery.data?.isOnline;
+
+  // Go online on mount
+  useEffect(() => { goOnline.mutate(); }, []);
+
+  // Track time online
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (sessionQuery.data?.lastOnlineAt && !isPaused) {
+        const diff = Math.floor((Date.now() - new Date(sessionQuery.data.lastOnlineAt).getTime()) / 60000);
+        setElapsed(diff);
+      }
+      if (isPaused && sessionQuery.data?.pauseStartedAt) {
+        const diff = Math.floor((Date.now() - new Date(sessionQuery.data.pauseStartedAt).getTime()) / 60000);
+        setPauseElapsed(diff);
+        // Auto-end pause after 60 minutes
+        if (diff >= 60) {
+          endPause.mutate();
+          toast.info("Pausa terminada automaticamente (limite 1h)");
+        }
+      }
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [sessionQuery.data, isPaused]);
+
+  const hours = Math.floor(elapsed / 60);
+  const mins = elapsed % 60;
+
+  return (
+    <Card className="border-0 shadow-sm">
+      <CardContent className="py-3">
+        <div className="flex items-center justify-between text-sm">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <div className={`h-2 w-2 rounded-full ${isPaused ? "bg-orange-500" : "bg-green-500 animate-pulse"}`} />
+              <span className="text-muted-foreground">{isPaused ? "Em Pausa" : "Online"}</span>
+            </div>
+            <span className="text-muted-foreground">|</span>
+            <span className="text-muted-foreground">Tempo de sessão: {hours}h {mins}min</span>
+            {isPaused && <span className="text-orange-500 font-medium">Pausa: {pauseElapsed}min / 60min</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            {isPaused ? (
+              <Button variant="ghost" size="sm" className="text-xs gap-1" onClick={() => endPause.mutate()}>
+                <Play className="h-3 w-3" /> Voltar
+              </Button>
+            ) : (
+              <Button variant="ghost" size="sm" className="text-xs gap-1" onClick={() => startPause.mutate()}>
+                <Pause className="h-3 w-3" /> Iniciar Pausa
+              </Button>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
 
 export default function Home() {
   const { user } = useAuth();
@@ -159,25 +227,7 @@ export default function Home() {
         </div>
 
         {/* Status Bar */}
-        <Card className="border-0 shadow-sm">
-          <CardContent className="py-3">
-            <div className="flex items-center justify-between text-sm">
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                  <span className="text-muted-foreground">Online</span>
-                </div>
-                <span className="text-muted-foreground">|</span>
-                <span className="text-muted-foreground">Tempo de sessão: 0h 0min</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" size="sm" className="text-xs">
-                  Iniciar Pausa
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        <SessionBar />
       </div>
     </DashboardLayout>
   );

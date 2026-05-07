@@ -30,17 +30,17 @@ export default function Calculadora() {
   const [mode, setMode] = useState<"luz" | "dual">("luz");
 
   // Client data
-  const [consKwh, setConsKwh] = useState("449");
+  const [consKwh, setConsKwh] = useState("");
   const [potencia, setPotencia] = useState("4.60");
-  const [atualKwh, setAtualKwh] = useState("0.1599");
-  const [atualFixo, setAtualFixo] = useState("0.3800");
-  const [litrosMes, setLitrosMes] = useState("100");
+  const [atualKwh, setAtualKwh] = useState("");
+  const [atualFixo, setAtualFixo] = useState("");
+  const [litrosMes, setLitrosMes] = useState("");
 
   // Gas data
-  const [consGas, setConsGas] = useState("200");
+  const [consGas, setConsGas] = useState("");
   const [escalaoGas, setEscalaoGas] = useState("2");
-  const [atualGasKwh, setAtualGasKwh] = useState("0.0950");
-  const [atualGasFixo, setAtualGasFixo] = useState("0.2000");
+  const [atualGasKwh, setAtualGasKwh] = useState("");
+  const [atualGasFixo, setAtualGasFixo] = useState("");
 
   // Discounts
   const [descRepsol, setDescRepsol] = useState(true);
