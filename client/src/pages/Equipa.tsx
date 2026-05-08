@@ -1,58 +1,246 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Users, Clock, Wifi, WifiOff } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Users, Mail, Info } from "lucide-react";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
+import { useEffect, useState } from "react";
 
 export default function Equipa() {
-  // In a full implementation, this would query team members
+  const { user } = useAuth();
+  const crmRole = (user as any)?.crmRole ?? "vendedor";
+  const isSuperAdmin = !!(user as any)?.isSuperAdmin;
+  const isCoordLike = crmRole === "coordenador" || isSuperAdmin;
+  const isTeamLeadRole = ["ce", "cej"].includes(crmRole);
+
+  const listQuery = trpc.teams.list.useQuery(undefined, { enabled: isCoordLike });
+  const mineQuery = trpc.teams.mine.useQuery(undefined, { enabled: isTeamLeadRole });
+
+  const [newTeamName, setNewTeamName] = useState("");
+  const [localEmails, setLocalEmails] = useState<Record<number, string>>({});
+
+  const createMutation = trpc.teams.create.useMutation({
+    onSuccess: () => {
+      toast.success("Equipa criada");
+      setNewTeamName("");
+      void listQuery.refetch();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Erro ao criar equipa"),
+  });
+
+  const saveEmailMutation = trpc.teams.updateContactEmail.useMutation({
+    onSuccess: () => {
+      toast.success("E-mail da equipa guardado");
+      void listQuery.refetch();
+      void mineQuery.refetch();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Erro ao guardar e-mail"),
+  });
+
+  const getDisplayEmailForTeamRow = (teamId: number, serverEmail: string | null | undefined) =>
+    localEmails[teamId] !== undefined ? localEmails[teamId] : (serverEmail ?? "");
+
+  const mineTeam = mineQuery.data;
+  const [mineEmail, setMineEmail] = useState("");
+
+  useEffect(() => {
+    if (!mineTeam) {
+      setMineEmail("");
+      return;
+    }
+    setMineEmail(mineTeam.contactEmail ?? "");
+  }, [mineTeam]);
+
+  const roleBadge =
+    crmRole === "coordenador"
+      ? "Coordenador"
+      : crmRole === "ce"
+        ? "Chefe de Equipa"
+        : crmRole === "cej"
+          ? "Chefe Equipa Jr."
+          : crmRole;
+
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Equipa</h1>
-          <p className="text-muted-foreground">Gestão de membros e monitorização de desempenho</p>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <Card className="border-0 shadow-sm text-center">
-            <CardContent className="pt-6">
-              <Wifi className="h-6 w-6 mx-auto text-green-500 mb-2" />
-              <p className="text-2xl font-bold">0</p>
-              <p className="text-xs text-muted-foreground">Online Agora</p>
-            </CardContent>
-          </Card>
-          <Card className="border-0 shadow-sm text-center">
-            <CardContent className="pt-6">
-              <Clock className="h-6 w-6 mx-auto text-orange-500 mb-2" />
-              <p className="text-2xl font-bold">0</p>
-              <p className="text-xs text-muted-foreground">Em Pausa</p>
-            </CardContent>
-          </Card>
-          <Card className="border-0 shadow-sm text-center">
-            <CardContent className="pt-6">
-              <WifiOff className="h-6 w-6 mx-auto text-gray-500 mb-2" />
-              <p className="text-2xl font-bold">0</p>
-              <p className="text-xs text-muted-foreground">Offline</p>
-            </CardContent>
-          </Card>
+          <p className="text-muted-foreground">
+            Uma instância do CRM; várias empresas (tenants por coordenador) e dentro de cada empresa várias equipas.
+          </p>
         </div>
 
         <Card className="border-0 shadow-sm">
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2">
-              <Users className="h-5 w-5 text-primary" />
-              Membros da Equipa
+              <Info className="h-5 w-5 text-muted-foreground" />
+              Como a hierarquia funciona neste momento
             </CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-              <Users className="h-12 w-12 mb-3 opacity-30" />
-              <p className="text-sm font-medium">Gestão de equipa</p>
-              <p className="text-xs mt-1">Os membros da equipa e os seus tempos online aparecerão aqui</p>
-            </div>
+          <CardContent className="space-y-3 text-sm text-muted-foreground">
+            <ul className="list-disc space-y-2 pl-5">
+              <li>
+                <span className="font-medium text-foreground">Tenant (empresa)</span> — cada Coordenador criado pelo Super Admin é uma empresa isolada: todos os utilizadores e dados (contactos, vendas, campanhas, …) têm{' '}
+                <span className="font-medium text-foreground">tenantId</span> igual ao <span className="font-medium text-foreground">id desse coordenador</span>.
+                O próprio coordenador tem <span className="font-medium text-foreground">tenantId = próprio id</span>.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Coordenador</span> — vê todas as equipas {" "}
+                <em>da sua empresa</em> aqui e na Supervisão; o e-mail oficial é por equipa (<span className="font-medium text-foreground">teams</span>).
+                Membros podem ter <span className="font-medium text-foreground">teamId</span> para subdivisão dentro da mesma empresa.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Chefe de Equipa (CE)</span> — na Supervisão só vê vendedores
+                da mesma equipa: pelo seu <span className="font-medium text-foreground">teamId</span> ou quando é <span className="font-medium text-foreground">leaderId</span> da equipa na tabela <span className="font-medium text-foreground">teams</span>.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Chefe Jr. (CEJ)</span> — igual ao CE ao nível da equipa, mas apenas com o papel júnior; visão restrita pela mesma equipa.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Vendedor</span> — contactos assignados só a si distribuição, sem esta página no menu lateral.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">E-mail da equipa</span> — contacto oficial por equipa. O isolamento entre empresas é o <span className="font-medium text-foreground">tenantId</span>; dentro da empresa o refinamento usa <span className="font-medium text-foreground">teamId</span>.
+              </li>
+            </ul>
           </CardContent>
         </Card>
+
+        {isCoordLike ? (
+          <Card className="border-0 shadow-sm">
+            <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Users className="h-5 w-5 text-primary" />
+                Equipas e e-mail oficial
+              </CardTitle>
+              <Badge variant="outline">{crmRole}</Badge>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="flex flex-wrap gap-2 rounded-lg border p-3 bg-muted/30">
+                <Input
+                  placeholder="Nome da nova equipa"
+                  value={newTeamName}
+                  onChange={(e) => setNewTeamName(e.target.value)}
+                  className="max-w-md"
+                />
+                <Button
+                  type="button"
+                  disabled={!newTeamName.trim() || createMutation.isPending}
+                  onClick={() => createMutation.mutate({ name: newTeamName.trim() })}
+                >
+                  {createMutation.isPending ? "…" : "Criar equipa"}
+                </Button>
+              </div>
+
+              {listQuery.isLoading ? (
+                <div className="flex justify-center py-10">
+                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                </div>
+              ) : !listQuery.data?.length ? (
+                <p className="text-sm text-muted-foreground py-6 text-center">Ainda não existem registos na tabela de equipas.</p>
+              ) : (
+                <div className="space-y-4">
+                  {listQuery.data.map((t: { id: number; name: string; contactEmail: string | null; leaderId: number | null }) => (
+                    <div key={t.id} className="rounded-lg border p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-medium">{t.name}</div>
+                        <Badge variant="secondary" className="text-xs">
+                          id {t.id}
+                          {t.leaderId != null ? ` · líder utilizador ${t.leaderId}` : ""}
+                        </Badge>
+                      </div>
+                      <div className="space-y-2 max-w-xl">
+                        <Label htmlFor={`team-email-${t.id}`}>E-mail oficial da equipa</Label>
+                        <div className="flex flex-wrap gap-2">
+                          <Input
+                            id={`team-email-${t.id}`}
+                            type="email"
+                            placeholder="ex.: equipa.norte@empresa.pt"
+                            value={getDisplayEmailForTeamRow(t.id, t.contactEmail)}
+                            onChange={(e) =>
+                              setLocalEmails((prev) => ({ ...prev, [t.id]: e.target.value }))
+                            }
+                          />
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={saveEmailMutation.isPending}
+                            onClick={() => {
+                              const v = getDisplayEmailForTeamRow(t.id, t.contactEmail).trim();
+                              saveEmailMutation.mutate({
+                                teamId: t.id,
+                                contactEmail: v === "" ? "" : v,
+                              });
+                            }}
+                          >
+                            Guardar
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {isTeamLeadRole && !isCoordLike ? (
+          <Card className="border-0 shadow-sm">
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Mail className="h-5 w-5 text-primary" />
+                E-mail da minha equipa
+              </CardTitle>
+              <p className="text-sm font-normal text-muted-foreground pt-1">
+                Só pode configurar o e-mail para a equipa a que está associado (teamId ou liderança na tabela de equipas). Perfil atual:{" "}
+                <Badge variant="outline">{roleBadge}</Badge>
+              </p>
+            </CardHeader>
+            <CardContent>
+              {mineQuery.isLoading ? (
+                <div className="flex justify-center py-10">
+                  <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                </div>
+              ) : !mineTeam ? (
+                <p className="text-sm text-muted-foreground">
+                  Não foi encontrada equipa neste momento. Um coordenador precisa criar a equipa, definir-o como líder (<span className="font-medium">leaderId</span>) ou definir o seu <span className="font-medium">teamId</span> no utilizador.
+                </p>
+              ) : (
+                <div className="space-y-3 max-w-xl">
+                  <div className="text-sm font-medium">{mineTeam.name}</div>
+                  <div className="space-y-2">
+                    <Label htmlFor="mine-team-email">E-mail oficial da equipa</Label>
+                    <div className="flex flex-wrap gap-2">
+                      <Input
+                        id="mine-team-email"
+                        type="email"
+                        placeholder="equipa@empresa.pt"
+                        value={mineEmail}
+                        onChange={(e) => setMineEmail(e.target.value)}
+                      />
+                      <Button
+                        type="button"
+                        disabled={saveEmailMutation.isPending}
+                        onClick={() => {
+                          const v = mineEmail.trim();
+                          saveEmailMutation.mutate({
+                            teamId: mineTeam.id,
+                            contactEmail: v === "" ? "" : v,
+                          });
+                        }}
+                      >
+                        Guardar
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
-    </DashboardLayout>
   );
 }

@@ -15,6 +15,69 @@
       "when": 1778164231345,
       "tag": "0001_fearless_phantom_reporter",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1778245393496,
+      "tag": "0002_gifted_exodus",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1778245779673,
+      "tag": "0003_tough_sleeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1778245929444,
+      "tag": "0004_fat_firebrand",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1778246112603,
+      "tag": "0005_magenta_starhawk",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1778248605625,
+      "tag": "0006_lovely_avengers",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1778250000001,
+      "tag": "0007_team_contact_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1778250000002,
+      "tag": "0008_multitenant",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1778250001000,
+      "tag": "0009_sos_requests_tenant",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1778250002000,
+      "tag": "0010_users_presence_session_meta",
+      "breakpoints": true
     }
   ]
 }

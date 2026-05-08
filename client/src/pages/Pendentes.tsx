@@ -1,18 +1,25 @@
-import DashboardLayout from "@/components/DashboardLayout";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Clock, Bell, Plus, CheckCircle } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Clock, Bell, Plus, Pencil } from "lucide-react";
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
 export default function Pendentes() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [editPendente, setEditPendente] = useState<any>(null);
+  const [editForm, setEditForm] = useState({
+    returnDate: "",
+    notes: "",
+    offerDesired: "",
+    status: "agendado" as string,
+  });
   const [newPendente, setNewPendente] = useState({
     contactId: "",
     returnDate: "",
@@ -30,6 +37,27 @@ export default function Pendentes() {
     },
     onError: (err: any) => toast.error(err.message),
   });
+
+  const updatePendenteMutation = trpc.pendentes.update.useMutation({
+    onSuccess: () => {
+      toast.success("Pendente actualizado!");
+      setEditPendente(null);
+      pendentesQuery.refetch();
+    },
+    onError: (err: any) => toast.error(err.message),
+  });
+
+  const openEdit = (p: any) => {
+    setEditPendente(p);
+    const d = new Date(p.returnDate);
+    const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    setEditForm({
+      returnDate: local,
+      notes: p.notes || "",
+      offerDesired: p.offerDesired || "",
+      status: p.status || "agendado",
+    });
+  };
 
   const handleCreate = () => {
     if (!newPendente.contactId || !newPendente.returnDate) {
@@ -52,7 +80,6 @@ export default function Pendentes() {
   };
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
@@ -115,6 +142,71 @@ export default function Pendentes() {
               </div>
             </DialogContent>
           </Dialog>
+
+          <Dialog open={!!editPendente} onOpenChange={(o) => !o && setEditPendente(null)}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Editar pendente</DialogTitle>
+              </DialogHeader>
+              {editPendente && (
+                <div className="space-y-4 pt-4">
+                  <p className="text-sm text-muted-foreground">
+                    Contacto #{editPendente.contactId}
+                    {editPendente.contactPhone ? ` · ${editPendente.contactPhone}` : ""}
+                  </p>
+                  <div className="space-y-2">
+                    <Label>Data e Hora do Retorno *</Label>
+                    <Input
+                      type="datetime-local"
+                      value={editForm.returnDate}
+                      onChange={(e) => setEditForm({ ...editForm, returnDate: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Estado</Label>
+                    <Select value={editForm.status} onValueChange={(v) => setEditForm({ ...editForm, status: v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="agendado">Agendado</SelectItem>
+                        <SelectItem value="realizado">Realizado</SelectItem>
+                        <SelectItem value="expirado">Expirado</SelectItem>
+                        <SelectItem value="cancelado">Cancelado</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Notas</Label>
+                    <Textarea
+                      value={editForm.notes}
+                      onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Oferta desejada</Label>
+                    <Input
+                      value={editForm.offerDesired}
+                      onChange={(e) => setEditForm({ ...editForm, offerDesired: e.target.value })}
+                    />
+                  </div>
+                  <Button
+                    className="w-full"
+                    disabled={!editForm.returnDate || updatePendenteMutation.isPending}
+                    onClick={() =>
+                      updatePendenteMutation.mutate({
+                        id: editPendente.id,
+                        returnDate: new Date(editForm.returnDate).toISOString(),
+                        notes: editForm.notes || null,
+                        offerDesired: editForm.offerDesired || null,
+                        status: editForm.status as any,
+                      })
+                    }
+                  >
+                    {updatePendenteMutation.isPending ? "A guardar..." : "Guardar"}
+                  </Button>
+                </div>
+              )}
+            </DialogContent>
+          </Dialog>
         </div>
 
         <Card className="border-0 shadow-sm">
@@ -139,15 +231,24 @@ export default function Pendentes() {
                           <Bell className="h-4 w-4 text-orange-600" />
                         </div>
                         <div>
-                          <p className="font-medium">Contacto #{p.contactId}</p>
+                          <p className="font-medium">
+                            {p.contactPhone || p.contactName
+                              ? `${p.contactName || "—"} · ${p.contactPhone || ""}`
+                              : `Contacto #${p.contactId}`}
+                          </p>
                           <p className="text-sm text-muted-foreground">
                             Retorno: {new Date(p.returnDate).toLocaleString("pt-PT")}
                           </p>
                         </div>
                       </div>
-                      <Badge className={statusColors[p.status] || ""}>
-                        {p.status}
-                      </Badge>
+                      <div className="flex items-center gap-2">
+                        <Badge className={statusColors[p.status] || ""}>
+                          {p.status}
+                        </Badge>
+                        <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(p)}>
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </div>
                     {p.notes && (
                       <p className="text-sm text-muted-foreground ml-13 pl-13">
@@ -166,6 +267,5 @@ export default function Pendentes() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
   );
 }

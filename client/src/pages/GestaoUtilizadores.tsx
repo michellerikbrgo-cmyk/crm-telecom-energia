@@ -1,12 +1,11 @@
-import DashboardLayout from "@/components/DashboardLayout";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Users, UserPlus, Shield } from "lucide-react";
+import { Users, UserPlus } from "lucide-react";
 import { useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
@@ -15,20 +14,32 @@ import { toast } from "sonner";
 export default function GestaoUtilizadores() {
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
+  const isSuperAdmin = !!(user as any)?.isSuperAdmin;
   const [showDialog, setShowDialog] = useState(false);
   const [newUser, setNewUser] = useState({
     name: "",
     email: "",
     password: "",
     crmRole: "vendedor",
+    tenantCoordinatorUserId: "" as string | number,
   });
 
   const usersQuery = trpc.authLocal.listUsers.useQuery();
+  const coordinatorsQuery = trpc.authLocal.listCoordinators.useQuery(undefined, {
+    enabled: isSuperAdmin,
+  });
+
   const registerMutation = trpc.authLocal.register.useMutation({
     onSuccess: () => {
       toast.success("Utilizador criado com sucesso!");
       setShowDialog(false);
-      setNewUser({ name: "", email: "", password: "", crmRole: "vendedor" });
+      setNewUser({
+        name: "",
+        email: "",
+        password: "",
+        crmRole: "vendedor",
+        tenantCoordinatorUserId: "",
+      });
       usersQuery.refetch();
     },
     onError: (err: any) => toast.error(err.message),
@@ -48,20 +59,65 @@ export default function GestaoUtilizadores() {
     coordenador: "bg-red-100 text-red-700",
   };
 
-  // Roles that current user can create
-  const allowedRoles = crmRole === "coordenador"
-    ? ["vendedor", "cej", "ce", "coordenador"]
-    : crmRole === "ce"
-    ? ["vendedor", "cej"]
-    : [];
+  const getDisplayRole = (u: any) => {
+    if (u?.isSuperAdmin) return "Super Admin";
+    return roleLabels[u?.crmRole] || u?.crmRole || "-";
+  };
+
+  const getRoleColor = (u: any) => {
+    if (u?.isSuperAdmin) return "bg-black text-white";
+    return roleColors[u?.crmRole] || "";
+  };
+
+  const allowedRoles = isSuperAdmin
+    ? (["vendedor", "cej", "ce", "coordenador"] as const)
+    : crmRole === "coordenador"
+      ? (["vendedor", "cej", "ce"] as const)
+      : crmRole === "ce"
+        ? (["vendedor", "cej"] as const)
+        : crmRole === "cej"
+          ? (["vendedor"] as const)
+          : ([] as const);
+
+  const submitCreate = () => {
+    const base = {
+      name: newUser.name.trim(),
+      email: newUser.email.trim(),
+      password: newUser.password,
+      crmRole: newUser.crmRole as "vendedor" | "cej" | "ce" | "coordenador",
+    };
+
+    if (isSuperAdmin && newUser.crmRole !== "coordenador") {
+      const tc = Number(newUser.tenantCoordinatorUserId);
+      if (!tc) {
+        toast.error("Escolha a empresa (coordenador) onde o utilizador fica isolado.");
+        return;
+      }
+      registerMutation.mutate({ ...base, tenantCoordinatorUserId: tc });
+      return;
+    }
+
+    registerMutation.mutate(base);
+  };
+
+  const disableSubmit =
+    !newUser.name.trim() ||
+    !newUser.email.trim() ||
+    newUser.password.length < 6 ||
+    registerMutation.isPending ||
+    (isSuperAdmin &&
+      newUser.crmRole !== "coordenador" &&
+      !Number(newUser.tenantCoordinatorUserId));
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Gestão de Utilizadores</h1>
-            <p className="text-muted-foreground">Criar e gerir os acessos da equipa</p>
+            <p className="text-muted-foreground">
+              Hierarquia: só pode criar cargos abaixo do seu; cada coordenador é uma empresa (tenant) isolada nos dados.
+              O Super Admin cria coordenadores e, para os outros cargos, escolhe a empresa.
+            </p>
           </div>
           {allowedRoles.length > 0 && (
             <Dialog open={showDialog} onOpenChange={setShowDialog}>
@@ -104,20 +160,48 @@ export default function GestaoUtilizadores() {
                   </div>
                   <div className="space-y-2">
                     <Label>Cargo *</Label>
-                    <Select value={newUser.crmRole} onValueChange={(v) => setNewUser({ ...newUser, crmRole: v })}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
+                    <Select
+                      value={newUser.crmRole}
+                      onValueChange={(v) => setNewUser({ ...newUser, crmRole: v, tenantCoordinatorUserId: "" })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
                       <SelectContent>
-                        {allowedRoles.map(role => (
-                          <SelectItem key={role} value={role}>{roleLabels[role]}</SelectItem>
+                        {allowedRoles.map((role) => (
+                          <SelectItem key={role} value={role}>
+                            {roleLabels[role]}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-                  <Button
-                    className="w-full"
-                    onClick={() => registerMutation.mutate(newUser as any)}
-                    disabled={!newUser.name || !newUser.email || !newUser.password || registerMutation.isPending}
-                  >
+
+                  {isSuperAdmin && newUser.crmRole !== "coordenador" ? (
+                    <div className="space-y-2">
+                      <Label>Empresa (coordenador dono do tenant) *</Label>
+                      <Select
+                        value={newUser.tenantCoordinatorUserId ? String(newUser.tenantCoordinatorUserId) : ""}
+                        onValueChange={(v) => setNewUser({ ...newUser, tenantCoordinatorUserId: v })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Seleccione o coordenador" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {(coordinatorsQuery.data ?? []).map((c) => (
+                            <SelectItem key={c.id} value={String(c.id)}>
+                              {(c.name || c.email || `ID ${c.id}`) + (c.email ? ` · ${c.email}` : "")}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        O novo utilizador só verá dados desta empresa, como o coordenador e toda a cadeia abaixo dele.
+                      </p>
+                    </div>
+                  ) : null}
+
+                  <Button className="w-full" onClick={submitCreate} disabled={disableSubmit}>
                     {registerMutation.isPending ? "A criar..." : "Criar Utilizador"}
                   </Button>
                 </div>
@@ -150,12 +234,13 @@ export default function GestaoUtilizadores() {
                       <div>
                         <p className="font-medium">{u.name || "Sem nome"}</p>
                         <p className="text-sm text-muted-foreground">{u.email}</p>
+                        {u.tenantId != null && (
+                          <p className="text-xs text-muted-foreground">tenant: coordenador #{u.tenantId}</p>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge className={roleColors[u.crmRole] || ""}>
-                        {roleLabels[u.crmRole] || u.crmRole}
-                      </Badge>
+                      <Badge className={getRoleColor(u)}>{getDisplayRole(u)}</Badge>
                       <div className={`h-2 w-2 rounded-full ${u.isOnline ? "bg-green-500" : "bg-gray-300"}`} />
                     </div>
                   </div>
@@ -165,6 +250,5 @@ export default function GestaoUtilizadores() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
   );
 }

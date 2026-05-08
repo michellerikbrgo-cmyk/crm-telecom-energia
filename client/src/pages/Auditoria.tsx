@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Shield } from "lucide-react";
@@ -8,7 +7,6 @@ export default function Auditoria() {
   const auditQuery = trpc.audit.list.useQuery();
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Auditoria</h1>
@@ -30,8 +28,11 @@ export default function Auditoria() {
             ) : (
               <div className="divide-y">
                 {auditQuery.data.map((log: any) => (
-                  <div key={log.id} className="flex items-center justify-between p-4 hover:bg-accent/50 transition-colors">
-                    <div>
+                  <div key={log.id} className="flex items-center justify-between p-4 hover:bg-accent/50 transition-colors gap-4">
+                    <div className="min-w-0">
+                      <p className="text-xs font-medium text-primary mb-0.5 truncate">
+                        {log.actorLabel ?? `Utilizador #${log.userId ?? "?"}`}
+                      </p>
                       <p className="font-medium text-sm">{log.action}</p>
                       <p className="text-xs text-muted-foreground">{log.details}</p>
                     </div>
@@ -48,6 +49,5 @@ export default function Auditoria() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
   );
 }
