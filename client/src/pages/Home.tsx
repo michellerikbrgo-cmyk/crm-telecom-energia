@@ -1,85 +1,49 @@
 import { useAuth } from "@/_core/hooks/useAuth";
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Phone, Users, Clock, TrendingUp, AlertTriangle, Trophy, Zap, Pause, Play } from "lucide-react";
+import { Phone, Clock, TrendingUp, AlertTriangle, Trophy, Zap } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { useState, useEffect } from "react";
+import { useLocation } from "wouter";
 
-function SessionBar() {
-  const sessionQuery = trpc.session.getStatus.useQuery(undefined, { refetchInterval: 30000 });
-  const startPause = trpc.session.startPause.useMutation({ onSuccess: () => sessionQuery.refetch() });
-  const endPause = trpc.session.endPause.useMutation({ onSuccess: () => sessionQuery.refetch() });
-  const goOnline = trpc.session.goOnline.useMutation({ onSuccess: () => sessionQuery.refetch() });
-
-  const [elapsed, setElapsed] = useState(0);
-  const [pauseElapsed, setPauseElapsed] = useState(0);
-  const isPaused = !!sessionQuery.data?.pauseStartedAt;
-  const isOnline = sessionQuery.data?.isOnline;
-
-  // Go online on mount
-  useEffect(() => { goOnline.mutate(); }, []);
-
-  // Track time online
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (sessionQuery.data?.lastOnlineAt && !isPaused) {
-        const diff = Math.floor((Date.now() - new Date(sessionQuery.data.lastOnlineAt).getTime()) / 60000);
-        setElapsed(diff);
-      }
-      if (isPaused && sessionQuery.data?.pauseStartedAt) {
-        const diff = Math.floor((Date.now() - new Date(sessionQuery.data.pauseStartedAt).getTime()) / 60000);
-        setPauseElapsed(diff);
-        // Auto-end pause after 60 minutes
-        if (diff >= 60) {
-          endPause.mutate();
-          toast.info("Pausa terminada automaticamente (limite 1h)");
-        }
-      }
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [sessionQuery.data, isPaused]);
-
-  const hours = Math.floor(elapsed / 60);
-  const mins = elapsed % 60;
-
-  return (
-    <Card className="border-0 shadow-sm">
-      <CardContent className="py-3">
-        <div className="flex items-center justify-between text-sm">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2">
-              <div className={`h-2 w-2 rounded-full ${isPaused ? "bg-orange-500" : "bg-green-500 animate-pulse"}`} />
-              <span className="text-muted-foreground">{isPaused ? "Em Pausa" : "Online"}</span>
-            </div>
-            <span className="text-muted-foreground">|</span>
-            <span className="text-muted-foreground">Tempo de sessão: {hours}h {mins}min</span>
-            {isPaused && <span className="text-orange-500 font-medium">Pausa: {pauseElapsed}min / 60min</span>}
-          </div>
-          <div className="flex items-center gap-2">
-            {isPaused ? (
-              <Button variant="ghost" size="sm" className="text-xs gap-1" onClick={() => endPause.mutate()}>
-                <Play className="h-3 w-3" /> Voltar
-              </Button>
-            ) : (
-              <Button variant="ghost" size="sm" className="text-xs gap-1" onClick={() => startPause.mutate()}>
-                <Pause className="h-3 w-3" /> Iniciar Pausa
-              </Button>
-            )}
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
+const STATS_EMPTY = {
+  callsToday: 0,
+  pendentesToday: 0,
+  overduePendenteCount: 0,
+  salesMonth: 0,
+  totalContacts: 0,
+  salesPipeline: {
+    aguarda_instalacao: 0,
+    em_aberto: 0,
+    activo: 0,
+    e_switch: 0,
+    cancelado: 0,
+  },
+  pendenteAlerts: [] as Array<{
+    id: number;
+    contactId: number;
+    returnDate: Date;
+    contactPhone: string | null;
+    contactName: string | null;
+  }>,
+  rankingPosition: null as number | null,
+};
 
 export default function Home() {
   const { user } = useAuth();
+  const [, setLocation] = useLocation();
+  const utils = trpc.useUtils();
 
-  const statsQuery = trpc.dashboard.stats.useQuery();
-  const stats = statsQuery.data || { callsToday: 0, pendentesToday: 0, salesMonth: 0, totalContacts: 0 };
+  const statsQuery = trpc.dashboard.stats.useQuery(undefined, { refetchInterval: 60000 });
+  const raw = statsQuery.data;
+  const stats = {
+    ...STATS_EMPTY,
+    ...(raw || {}),
+    salesPipeline: { ...STATS_EMPTY.salesPipeline, ...(raw?.salesPipeline || {}) },
+    pendenteAlerts: raw?.pendenteAlerts ?? STATS_EMPTY.pendenteAlerts,
+  };
+  const pendentesQuery = trpc.pendentes.list.useQuery(undefined, { refetchInterval: 60000 });
 
   const sosMutation = trpc.sos.create.useMutation({
     onSuccess: () => toast.success("SOS enviado! O seu chefe foi notificado."),
@@ -93,22 +57,27 @@ export default function Home() {
     ce: "Chefe de Equipa",
     coordenador: "Coordenador",
   };
+  const displayRole = (user as any)?.isSuperAdmin ? "Super Admin" : (roleLabelMap[crmRole] || "Vendedor");
+  const seesSupervision =
+    !!(user as any)?.isSuperAdmin || ["cej", "ce", "coordenador"].includes(crmRole);
+
+  const u = user as { name?: string | null } | null | undefined;
+  const welcomeName = typeof u?.name === "string" && u.name.trim() ? u.name.trim() : "Utilizador";
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         {/* Header */}
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">
-              Bem-vindo, {user?.name || "Utilizador"}
+              Bem-vindo, {welcomeName}
             </h1>
             <p className="text-muted-foreground">
               Painel de controlo da sua operação comercial
             </p>
           </div>
           <Badge variant="secondary" className="w-fit text-sm px-3 py-1">
-            {roleLabelMap[crmRole] || "Vendedor"}
+            {displayRole}
           </Badge>
         </div>
 
@@ -154,7 +123,7 @@ export default function Home() {
             <CardContent>
               <div className="text-3xl font-bold">{stats.salesMonth}</div>
               <p className="text-xs text-muted-foreground mt-1">
-                Telecom + Energia
+                Activas com instalação registada no mês
               </p>
             </CardContent>
           </Card>
@@ -167,13 +136,49 @@ export default function Home() {
               <Trophy className="h-4 w-4 text-chart-5" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold">-</div>
+              <div className="text-3xl font-bold">
+                {stats.rankingPosition != null ? `#${stats.rankingPosition}` : "—"}
+              </div>
               <p className="text-xs text-muted-foreground mt-1">
-                Posição na equipa
+                Por vendas activas (instalação este mês)
               </p>
             </CardContent>
           </Card>
         </div>
+
+        {stats.overduePendenteCount > 0 && (
+          <Card className="border border-destructive/40 bg-destructive/5 shadow-sm">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2 text-destructive">
+                <AlertTriangle className="h-5 w-5" />
+                Pendentes em atraso ({stats.overduePendenteCount})
+              </CardTitle>
+              <p className="text-xs text-muted-foreground font-normal pt-1">
+                Ligações com data de retorno já passada — priorize o contacto ou reagende em Pendentes.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {stats.pendenteAlerts.slice(0, 6).map((a) => (
+                <div key={a.id} className="flex items-center justify-between gap-2 rounded-md border border-destructive/20 bg-background/80 px-3 py-2 text-sm">
+                  <div className="min-w-0">
+                    <span className="font-medium truncate block">
+                      {a.contactPhone || `Contacto #${a.contactId}`}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {new Date(a.returnDate).toLocaleString("pt-PT")}
+                    </span>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => setLocation("/discador")}>
+                    Discador
+                  </Button>
+                </div>
+              ))}
+              <Button variant="link" className="px-0 h-auto text-xs" onClick={() => setLocation("/pendentes")}>
+                Ver todos os pendentes →
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Main Content Grid */}
         <div className="grid gap-4 lg:grid-cols-7">
@@ -186,11 +191,33 @@ export default function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-                <Clock className="h-12 w-12 mb-3 opacity-30" />
-                <p className="text-sm">Nenhum pendente agendado</p>
-                <p className="text-xs mt-1">Os seus retornos aparecerão aqui</p>
-              </div>
+              {!pendentesQuery.data?.length ? (
+                <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
+                  <Clock className="h-12 w-12 mb-3 opacity-30" />
+                  <p className="text-sm">Nenhum pendente agendado</p>
+                  <p className="text-xs mt-1">Os seus retornos aparecerão aqui</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {pendentesQuery.data.slice(0, 5).map((p: any) => (
+                    <div key={p.id} className="flex items-center justify-between rounded-lg border p-3">
+                      <div className="min-w-0">
+                        <div className="font-medium truncate">
+                          {p.contactPhone
+                            ? `${p.contactName ? `${p.contactName} · ` : ""}${p.contactPhone}`
+                            : `Contacto #${p.contactId}`}
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {new Date(p.returnDate).toLocaleString("pt-PT")} · {p.status}
+                        </div>
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => setLocation("/pendentes")}>
+                        Ver
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -203,11 +230,32 @@ export default function Home() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <Button variant="outline" className="w-full justify-start gap-2 h-11">
+              <Button
+                variant="outline"
+                className="w-full justify-start gap-2 h-11"
+                onClick={async () => {
+                  if (crmRole !== "vendedor") {
+                    toast.info("A fila «próximo contacto» é usada por vendedores; abra o Discador ou Supervisão conforme o seu perfil.");
+                    setLocation(seesSupervision ? "/supervisao" : "/contactos");
+                    return;
+                  }
+                  try {
+                    const next = await utils.dialer.next.fetch();
+                    if (!next) toast.info("Não há contactos disponíveis na fila.");
+                    setLocation("/discador");
+                  } catch (e: any) {
+                    toast.error(e?.message || "Não foi possível obter o próximo contacto.");
+                  }
+                }}
+              >
                 <Phone className="h-4 w-4" />
                 Próximo Contacto
               </Button>
-              <Button variant="outline" className="w-full justify-start gap-2 h-11">
+              <Button
+                variant="outline"
+                className="w-full justify-start gap-2 h-11"
+                onClick={() => setLocation("/pendentes")}
+              >
                 <Clock className="h-4 w-4" />
                 Novo Pendente
               </Button>
@@ -225,10 +273,6 @@ export default function Home() {
             </CardContent>
           </Card>
         </div>
-
-        {/* Status Bar */}
-        <SessionBar />
       </div>
-    </DashboardLayout>
   );
 }

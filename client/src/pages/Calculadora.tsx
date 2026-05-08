@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -129,7 +128,6 @@ export default function Calculadora() {
   const fmt = (v: number) => v.toFixed(2) + " €";
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Simulador Vodafone Repsol</h1>
@@ -440,6 +438,5 @@ export default function Calculadora() {
           </div>
         </div>
       </div>
-    </DashboardLayout>
   );
 }

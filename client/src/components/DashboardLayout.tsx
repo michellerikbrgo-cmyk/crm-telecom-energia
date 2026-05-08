@@ -21,10 +21,11 @@ import {
 } from "@/components/ui/sidebar";
 // import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
+import { SessionBar } from "@/components/SessionBar";
 import { Button } from "./ui/button";
 
 type MenuItem = {
@@ -36,6 +37,7 @@ type MenuItem = {
 
 const menuItems: MenuItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: PhoneCall, label: "Discador", path: "/discador", roles: ["vendedor"] },
   { icon: Phone, label: "Contactos", path: "/contactos", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: FileText, label: "Contratos", path: "/contratos", roles: ["vendedor", "cej", "ce", "coordenador"] },
@@ -44,11 +46,13 @@ const menuItems: MenuItem[] = [
   { icon: Megaphone, label: "Campanhas", path: "/campanhas", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Trophy, label: "Ranking", path: "/ranking", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Calendar, label: "Calendário", path: "/calendario", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Shield, label: "Supervisão", path: "/supervisao", roles: ["cej", "ce", "coordenador"] },
   { icon: BarChart3, label: "Relatórios", path: "/relatorios", roles: ["cej", "ce", "coordenador"] },
   { icon: Users, label: "Equipa", path: "/equipa", roles: ["cej", "ce", "coordenador"] },
   { icon: Shield, label: "Auditoria", path: "/auditoria", roles: ["ce", "coordenador"] },
   { icon: Zap, label: "Base de Dados", path: "/base-dados", roles: ["ce", "coordenador"] },
-  { icon: Users, label: "Utilizadores", path: "/utilizadores", roles: ["ce", "coordenador"] },
+  { icon: Users, label: "Utilizadores", path: "/utilizadores", roles: ["cej", "ce", "coordenador"] },
+  { icon: Shield, label: "Super Admin", path: "/super-admin", roles: ["super_admin"] },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -132,9 +136,19 @@ function DashboardLayoutContent({
   const [isResizing, setIsResizing] = useState(false);
   const sidebarRef = useRef<HTMLDivElement>(null);
   const userCrmRole = (user as any)?.crmRole || "vendedor";
-  const filteredMenuItems = menuItems.filter(item => !item.roles || item.roles.includes(userCrmRole));
+  const isSuperAdmin = !!(user as any)?.isSuperAdmin;
+  const filteredMenuItems = menuItems.filter(item => {
+    if (!item.roles) return true;
+    if (isSuperAdmin) return true;
+    if (item.roles.includes("super_admin")) return false;
+    return item.roles.includes(userCrmRole);
+  });
   const activeMenuItem = filteredMenuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
+
+  const profile = user as { name?: string | null; email?: string | null } | null | undefined;
+  const displayName = typeof profile?.name === "string" ? profile.name : "";
+  const displayEmail = typeof profile?.email === "string" ? profile.email : "";
 
   useEffect(() => {
     if (isCollapsed) {
@@ -228,15 +242,15 @@ function DashboardLayoutContent({
                 <button className="flex items-center gap-3 rounded-lg px-1 py-1 hover:bg-accent/50 transition-colors w-full text-left group-data-[collapsible=icon]:justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <Avatar className="h-9 w-9 border shrink-0">
                     <AvatarFallback className="text-xs font-medium">
-                      {user?.name?.charAt(0).toUpperCase()}
+                      {displayName.charAt(0).toUpperCase()}
                     </AvatarFallback>
                   </Avatar>
                   <div className="flex-1 min-w-0 group-data-[collapsible=icon]:hidden">
                     <p className="text-sm font-medium truncate leading-none">
-                      {user?.name || "-"}
+                      {displayName || "-"}
                     </p>
                     <p className="text-xs text-muted-foreground truncate mt-1.5">
-                      {user?.email || "-"}
+                      {displayEmail || "-"}
                     </p>
                   </div>
                 </button>
@@ -278,7 +292,10 @@ function DashboardLayoutContent({
             </div>
           </div>
         )}
-        <main className="flex-1 p-4">{children}</main>
+        <main className="flex-1 flex flex-col gap-4 p-4 min-h-0">
+          <SessionBar />
+          <div className="flex-1 min-w-0 min-h-0">{children}</div>
+        </main>
       </SidebarInset>
     </>
   );

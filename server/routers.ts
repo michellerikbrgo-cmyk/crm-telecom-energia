@@ -1,22 +1,145 @@
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import { publicProcedure, protectedProcedure, router, superAdminProcedure } from "./_core/trpc";
 import { z } from "zod";
 import { authLocalRouter } from "./authLocal";
 import { getDb } from "./db";
-import { contacts, pendentes, contracts, campaigns, competitorScripts, callLogs, auditLogs, sales, blacklist, sosRequests, gamification, contactOrigins, energyConfig, users } from "../drizzle/schema";
-import { eq, desc, and, sql, like, or } from "drizzle-orm";
+import {
+  appSettings,
+  contacts,
+  pendentes,
+  calendarEvents,
+  contracts,
+  campaigns,
+  campaignFiles,
+  competitorScripts,
+  callLogs,
+  auditLogs,
+  sales,
+  blacklist,
+  sosRequests,
+  gamification,
+  contactOrigins,
+  energyConfig,
+  users,
+  teams,
+} from "../drizzle/schema";
+import { eq, desc, asc, and, sql, like, or, inArray, type SQL } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
+import {
+  contactBelongsToUserTenant,
+  getUserIdsInTenant,
+  isSuperAdminUser,
+  whereContactsForUser,
+  whereSosRequestsForUser,
+  whereUsersForUser,
+  whereInTenantUserIds,
+} from "./tenantScope";
 import OpenAI from "openai";
+import { storagePut } from "./storage";
+import { decryptText, encryptText, maskSecret } from "./_core/cryptoSecrets";
+import {
+  getClientIp,
+  getClientUserAgent,
+  lookupGeoLabel,
+  summarizeUserAgent,
+} from "./_core/clientMeta";
+
+function canManageCampaigns(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(u?.isSuperAdmin || u?.crmRole === "ce" || u?.crmRole === "coordenador");
+}
+
+function canEditContactsAsManager(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(
+    u?.isSuperAdmin ||
+    u?.crmRole === "cej" ||
+    u?.crmRole === "ce" ||
+    u?.crmRole === "coordenador"
+  );
+}
+
+function canManageSalesLifecycle(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(u?.isSuperAdmin || ["cej", "ce", "coordenador"].includes(u?.crmRole || ""));
+}
+
+function canManageTeamsTable(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
+}
+
+/** Resolve equipa só deste contexto (sem tenant isolado por domínio; um CRM, várias equipas por teamId). */
+async function resolveUserTeamScopeId(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  user: { id: number; teamId?: number | null; crmRole?: string },
+): Promise<number | null> {
+  if (user.teamId) return user.teamId;
+  if (user.crmRole === "ce") {
+    const tl = await db.select({ id: teams.id }).from(teams).where(eq(teams.leaderId, user.id)).limit(1);
+    return tl[0]?.id ?? null;
+  }
+  return null;
+}
+
+async function assertContactAccessible(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  contactId: number,
+  user: any,
+) {
+  const [c] = await db.select().from(contacts).where(eq(contacts.id, contactId)).limit(1);
+  if (!c) throw new Error("Contacto não encontrado");
+  if (!contactBelongsToUserTenant(c as any, user) && !isSuperAdminUser(user)) {
+    throw new Error("Contacto não pertence à sua empresa.");
+  }
+}
+
+function assertEntityTenant(row: { tenantId?: number | null }, user: any, label = "Registo") {
+  if (isSuperAdminUser(user)) return;
+  const ut = user?.tenantId;
+  const rt = row?.tenantId;
+  if (ut == null || rt == null || Number(rt) !== Number(ut)) {
+    throw new Error(`${label} não pertence à esta empresa.`);
+  }
+}
+
+async function loadCampaignOrThrow(db: NonNullable<Awaited<ReturnType<typeof getDb>>>, id: number) {
+  const row = await db.select().from(campaigns).where(eq(campaigns.id, id)).limit(1);
+  if (!row[0]) throw new Error("Campanha não encontrada");
+  return row[0];
+}
 
 export const appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
-    logout: publicProcedure.mutation(({ ctx }) => {
+    me: publicProcedure.query(({ ctx }) => {
+      const u = ctx.user as Record<string, unknown> | null;
+      if (!u) return null;
+      const { password: _omit, ...safe } = u;
+      return safe;
+    }),
+    logout: publicProcedure.mutation(async ({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+      const u = ctx.user as { id?: number } | null;
+      if (u?.id) {
+        const db = await getDb();
+        if (db) {
+          try {
+            await db
+              .update(users)
+              .set({
+                isOnline: false,
+                presenceSessionStartedAt: null,
+              } as any)
+              .where(eq(users.id, u.id));
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       return { success: true } as const;
     }),
   }),
@@ -33,25 +156,30 @@ export const appRouter = router({
         let query = db.select().from(contacts);
         const conditions: any[] = [];
 
-        if (input?.search) {
-          conditions.push(
-            or(
-              like(contacts.name, `%${input.search}%`),
-              like(contacts.phone, `%${input.search}%`)
-            )
-          );
+        // Evitar que % ou _ na pesquisa quebrem o LIKE do MySQL; sem wildcards crus no valor
+        if (input?.search?.trim()) {
+          const cleaned = input.search.trim().replace(/[%_\\\\]/g, "");
+          if (cleaned.length > 0) {
+            conditions.push(
+              or(
+                and(sql`${contacts.name} IS NOT NULL`, like(contacts.name, `%${cleaned}%`)),
+                like(contacts.phone, `%${cleaned}%`),
+              ),
+            );
+          }
         }
         if (input?.status && input.status !== "todos") {
           conditions.push(eq(contacts.status, input.status as any));
         }
 
-        // Filtro por role
+        // Filtro por role + tenant (empresa)
         const user = ctx.user as any;
+        const tcond = whereContactsForUser(user);
+        if (tcond) conditions.push(tcond);
+
         if (user?.crmRole === "vendedor") {
-          // Vendedor só vê os contactos atribuídos a ele
           conditions.push(eq(contacts.assignedTo, user.id));
         }
-        // CEJ, CE e CO veem tudo
 
         if (conditions.length > 0) {
           query = query.where(and(...conditions)) as any;
@@ -61,17 +189,34 @@ export const appRouter = router({
       }),
 
     add: protectedProcedure
-      .input(z.object({
-        phone: z.string().min(1),
-        name: z.string().optional(),
-        email: z.string().optional(),
-        origin: z.string().default("Indicação"),
-        notes: z.string().optional(),
-      }))
+      .input(
+        z
+          .object({
+            phone: z.string(),
+            name: z.string().optional(),
+            email: z.string().optional(),
+            origin: z.string().optional(),
+            notes: z.string().optional(),
+          })
+          .transform((d) => ({
+            phone: String(d.phone ?? "").replace(/\s+/g, "").trim(),
+            name: d.name !== undefined && d.name !== "" ? String(d.name).trim() || undefined : undefined,
+            email: d.email !== undefined && d.email !== "" ? String(d.email).trim() || undefined : undefined,
+            origin: String(d.origin ?? "Indicação").trim().slice(0, 100) || "Indicação",
+            notes: d.notes !== undefined && d.notes !== "" ? String(d.notes).trim() || undefined : undefined,
+          }))
+          .refine((d) => d.phone.length >= 1, { message: "Telefone obrigatório", path: ["phone"] }),
+      )
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+        if (!user?.id) throw new Error("Sessão inválida: volte a iniciar sessão");
+
+        const contactTenantId = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && contactTenantId == null) {
+          throw new Error("Conta sem empresa (tenant). O Super Admin pode importar contactos globais; demais precisam de coordenador.");
+        }
 
         await db.insert(contacts).values({
           phone: input.phone,
@@ -81,7 +226,8 @@ export const appRouter = router({
           notes: input.notes || null,
           addedBy: user?.id,
           status: "novo",
-        });
+          tenantId: contactTenantId,
+        } as any);
 
         // Log audit
         await db.insert(auditLogs).values({
@@ -106,6 +252,18 @@ export const appRouter = router({
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
+        const contactTenantId = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && contactTenantId == null) {
+          throw new Error("Conta sem empresa (tenant); não é possível importar listas.");
+        }
+
+        let assigneeTenantOk = true;
+        if (!isSuperAdminUser(user) && input.assignTo) {
+          const a = await db.select({ tenantId: users.tenantId }).from(users).where(eq(users.id, input.assignTo)).limit(1);
+          assigneeTenantOk = !!a[0] && Number(a[0].tenantId) === Number(user.tenantId);
+        }
+        if (!assigneeTenantOk) throw new Error("O vendedor de destino não pertence à mesma empresa.");
+
         const values = input.phones.map((phone, i) => ({
           phone,
           name: input.names?.[i] || null,
@@ -115,6 +273,7 @@ export const appRouter = router({
           listName: input.listName || null,
           assignedTo: input.assignTo || null,
           lastAssignedAt: input.assignTo ? new Date() : null,
+          tenantId: contactTenantId,
         }));
 
         // Insert in batches of 500 to avoid query limits
@@ -132,6 +291,52 @@ export const appRouter = router({
 
         return { count: input.phones.length };
       }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        name: z.string().optional().nullable(),
+        phone: z.string().min(1).optional(),
+        email: z.string().optional().nullable(),
+        notes: z.string().optional().nullable(),
+        origin: z.string().optional(),
+        address: z.string().optional().nullable(),
+        postalCode: z.string().optional().nullable(),
+        status: z.enum(["novo", "em_contacto", "pendente", "venda", "nao_atende", "sem_interesse", "blacklist"]).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canEditContactsAsManager(ctx.user)) {
+          throw new Error("Sem permissão para editar contactos");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const { id, ...patch } = input;
+        const [existing] = await db.select().from(contacts).where(eq(contacts.id, id)).limit(1);
+        if (!existing) throw new Error("Contacto não encontrado");
+        if (!contactBelongsToUserTenant(existing as any, user) && !isSuperAdminUser(user)) {
+          throw new Error("Sem permissão sobre este contacto (outra empresa).");
+        }
+        const payload: Record<string, unknown> = {};
+        if (patch.name !== undefined) payload.name = patch.name;
+        if (patch.phone !== undefined) payload.phone = patch.phone;
+        if (patch.email !== undefined) payload.email = patch.email;
+        if (patch.notes !== undefined) payload.notes = patch.notes;
+        if (patch.origin !== undefined) payload.origin = patch.origin;
+        if (patch.address !== undefined) payload.address = patch.address;
+        if (patch.postalCode !== undefined) payload.postalCode = patch.postalCode;
+        if (patch.status !== undefined) payload.status = patch.status;
+        if (Object.keys(payload).length === 0) return { success: true };
+        await db.update(contacts).set(payload as any).where(eq(contacts.id, id));
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "update",
+          entity: "contact",
+          entityId: id,
+          details: "Atualizou contacto",
+        });
+        return { success: true };
+      }),
   }),
 
   // ============ PENDENTES ============
@@ -142,11 +347,28 @@ export const appRouter = router({
       const user = ctx.user as any;
 
       let conditions: any[] = [];
+      const pTenant = whereContactsForUser(user);
+      if (pTenant) conditions.push(pTenant);
+
       if (user?.crmRole === "vendedor") {
         conditions.push(eq(pendentes.vendedorId, user.id));
       }
 
-      let query = db.select().from(pendentes);
+      let query = db.select({
+        id: pendentes.id,
+        contactId: pendentes.contactId,
+        vendedorId: pendentes.vendedorId,
+        returnDate: pendentes.returnDate,
+        notes: pendentes.notes,
+        offerDesired: pendentes.offerDesired,
+        status: pendentes.status,
+        notified: pendentes.notified,
+        createdAt: pendentes.createdAt,
+        updatedAt: pendentes.updatedAt,
+        contactName: contacts.name,
+        contactPhone: contacts.phone,
+      }).from(pendentes)
+        .leftJoin(contacts, eq(pendentes.contactId, contacts.id));
       if (conditions.length > 0) {
         query = query.where(and(...conditions)) as any;
       }
@@ -166,6 +388,8 @@ export const appRouter = router({
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
+        await assertContactAccessible(db, input.contactId, user);
+
         await db.insert(pendentes).values({
           contactId: input.contactId,
           vendedorId: user?.id,
@@ -175,11 +399,191 @@ export const appRouter = router({
           status: "agendado",
         });
 
-        // Update contact status
         await db.update(contacts)
           .set({ status: "pendente" })
           .where(eq(contacts.id, input.contactId));
 
+        return { success: true };
+      }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        returnDate: z.string().optional(),
+        notes: z.string().optional().nullable(),
+        offerDesired: z.string().optional().nullable(),
+        status: z.enum(["agendado", "realizado", "expirado", "cancelado"]).optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const row = await db.select().from(pendentes).where(eq(pendentes.id, input.id)).limit(1);
+        const p = row[0];
+        if (!p) throw new Error("Pendente não encontrado");
+
+        await assertContactAccessible(db, p.contactId, user);
+
+        const isLeadership = !!user?.isSuperAdmin ||
+          ["cej", "ce", "coordenador"].includes(user?.crmRole);
+        if (!isLeadership && p.vendedorId !== user.id) {
+          throw new Error("Só pode editar os seus pendentes");
+        }
+
+        const payload: Record<string, unknown> = {};
+        if (input.returnDate !== undefined) payload.returnDate = new Date(input.returnDate);
+        if (input.notes !== undefined) payload.notes = input.notes;
+        if (input.offerDesired !== undefined) payload.offerDesired = input.offerDesired;
+        if (input.status !== undefined) payload.status = input.status;
+        if (Object.keys(payload).length === 0) return { success: true };
+
+        await db.update(pendentes).set(payload as any).where(eq(pendentes.id, input.id));
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "update",
+          entity: "pendente",
+          entityId: input.id,
+          details: `Atualizou pendente #${input.id}`,
+        });
+        return { success: true };
+      }),
+  }),
+
+  // ============ CALENDAR ============
+  calendar: router({
+    list: protectedProcedure
+      .input(z.object({ from: z.string(), to: z.string() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+
+        const from = new Date(input.from);
+        const to = new Date(input.to);
+
+        const baseRange = and(
+          sql`${calendarEvents.startAt} >= ${from}`,
+          sql`${calendarEvents.startAt} < ${to}`,
+        ) as SQL;
+
+        if (user?.crmRole === "vendedor") {
+          return await db.select().from(calendarEvents).where(
+            and(
+              baseRange,
+              or(eq(calendarEvents.assignedTo, user.id), eq(calendarEvents.createdBy, user.id)),
+            ),
+          ).orderBy(desc(calendarEvents.startAt));
+        }
+
+        const calParts: SQL[] = [baseRange];
+        if (!isSuperAdminUser(user) && user.tenantId != null) {
+          calParts.push(eq(calendarEvents.tenantId, user.tenantId));
+        }
+
+        return await db.select().from(calendarEvents)
+          .where(and(...calParts))
+          .orderBy(desc(calendarEvents.startAt));
+      }),
+
+    create: protectedProcedure
+      .input(z.object({
+        title: z.string().min(1),
+        description: z.string().optional(),
+        type: z.enum(["geral", "pendente", "venda", "instalacao"]).default("geral"),
+        startAt: z.string(),
+        endAt: z.string().optional(),
+        allDay: z.boolean().default(true),
+        contactId: z.number().optional(),
+        assignedTo: z.number().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const startAt = new Date(input.startAt);
+        const endAt = input.endAt ? new Date(input.endAt) : null;
+
+        const evtTid = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && evtTid == null) throw new Error("Conta sem empresa.");
+
+        await db.insert(calendarEvents).values({
+          title: input.title,
+          description: input.description || null,
+          type: input.type,
+          startAt,
+          endAt,
+          allDay: input.allDay,
+          contactId: input.contactId ?? null,
+          assignedTo: input.assignedTo ?? null,
+          createdBy: user?.id,
+          tenantId: evtTid,
+        } as any);
+
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "calendar_create",
+          entity: "calendarEvent",
+          details: `Criou evento: ${input.title}`,
+        });
+
+        return { success: true };
+      }),
+
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        title: z.string().min(1).optional(),
+        description: z.string().nullable().optional(),
+        type: z.enum(["geral", "pendente", "venda", "instalacao"]).optional(),
+        startAt: z.string().optional(),
+        endAt: z.string().nullable().optional(),
+        allDay: z.boolean().optional(),
+        contactId: z.number().nullable().optional(),
+        assignedTo: z.number().nullable().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const existing = await db.select().from(calendarEvents).where(eq(calendarEvents.id, input.id)).limit(1);
+        if (!existing[0]) throw new Error("Evento não encontrado");
+        if (user?.crmRole === "vendedor" && existing[0].createdBy !== user.id) {
+          throw new Error("Sem permissão para editar este evento");
+        }
+        assertEntityTenant(existing[0] as any, user, "Evento");
+
+        await db.update(calendarEvents).set({
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.description !== undefined ? { description: input.description } : {}),
+          ...(input.type !== undefined ? { type: input.type } : {}),
+          ...(input.startAt !== undefined ? { startAt: new Date(input.startAt) } : {}),
+          ...(input.endAt !== undefined ? { endAt: input.endAt ? new Date(input.endAt) : null } : {}),
+          ...(input.allDay !== undefined ? { allDay: input.allDay } : {}),
+          ...(input.contactId !== undefined ? { contactId: input.contactId } : {}),
+          ...(input.assignedTo !== undefined ? { assignedTo: input.assignedTo } : {}),
+        }).where(eq(calendarEvents.id, input.id));
+
+        return { success: true };
+      }),
+
+    remove: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const existing = await db.select().from(calendarEvents).where(eq(calendarEvents.id, input.id)).limit(1);
+        if (!existing[0]) return { success: true };
+        if (user?.crmRole === "vendedor" && existing[0].createdBy !== user.id) {
+          throw new Error("Sem permissão para apagar este evento");
+        }
+        assertEntityTenant(existing[0] as any, user, "Evento");
+
+        await db.delete(calendarEvents).where(eq(calendarEvents.id, input.id));
         return { success: true };
       }),
   }),
@@ -191,12 +595,22 @@ export const appRouter = router({
       if (!db) return [];
       const user = ctx.user as any;
 
-      let query = db.select().from(contracts);
-      if (user?.crmRole === "vendedor") {
-        query = query.where(eq(contracts.vendedorId, user.id)) as any;
-      }
+      let query = db
+        .select()
+        .from(contracts)
+        .innerJoin(contacts, eq(contracts.contactId, contacts.id));
 
-      return await (query as any).orderBy(desc(contracts.createdAt)).limit(50);
+      const parts: SQL[] = [];
+      if (user?.crmRole === "vendedor") {
+        parts.push(eq(contracts.vendedorId, user.id));
+      }
+      const cten = whereContactsForUser(user);
+      if (cten) parts.push(cten);
+
+      if (parts.length) query = (query as any).where(and(...parts));
+
+      const rows = await (query as any).orderBy(desc(contracts.createdAt)).limit(50);
+      return rows.map((r: { contracts: (typeof contracts.$inferSelect) }) => r.contracts);
     }),
 
     create: protectedProcedure
@@ -209,6 +623,8 @@ export const appRouter = router({
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+
+        await assertContactAccessible(db, input.contactId, user);
 
         await db.insert(contracts).values({
           contactId: input.contactId,
@@ -224,12 +640,18 @@ export const appRouter = router({
 
   // ============ CAMPAIGNS ============
   campaigns: router({
-    list: protectedProcedure.query(async () => {
+    list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
-      return await db.select().from(campaigns)
-        .where(eq(campaigns.isActive, true))
-        .orderBy(desc(campaigns.createdAt));
+      const user = ctx.user as any;
+      let q = db.select().from(campaigns);
+      const cf = isSuperAdminUser(user)
+        ? undefined
+        : user.tenantId != null
+          ? eq(campaigns.tenantId, user.tenantId)
+          : sql`1=0`;
+      if (cf) q = (q as any).where(cf);
+      return await (q as any).orderBy(desc(campaigns.createdAt));
     }),
 
     create: protectedProcedure
@@ -237,19 +659,136 @@ export const appRouter = router({
         title: z.string().min(1),
         description: z.string().optional(),
         product: z.enum(["telecom", "energia", "ambos"]).default("ambos"),
+        startDate: z.string().optional(),
+        endDate: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
+        if (!canManageCampaigns(ctx.user)) {
+          throw new Error("Só Chefes de Equipa e Coordenadores podem criar campanhas");
+        }
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+
+        const tid = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && tid == null) throw new Error("Conta sem empresa.");
 
         await db.insert(campaigns).values({
           title: input.title,
           description: input.description || null,
           product: input.product,
+          startDate: input.startDate ? new Date(input.startDate) : null,
+          endDate: input.endDate ? new Date(input.endDate) : null,
           createdBy: user?.id,
+          tenantId: tid,
+        } as any);
+
+        return { success: true };
+      }),
+
+    archive: protectedProcedure
+      .input(z.object({ campaignId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canManageCampaigns(ctx.user)) {
+          throw new Error("Sem permissão");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const camp = await loadCampaignOrThrow(db, input.campaignId);
+        assertEntityTenant(camp as any, user, "Campanha");
+        await db.update(campaigns).set({ isActive: false }).where(eq(campaigns.id, input.campaignId));
+        return { success: true };
+      }),
+
+    remove: protectedProcedure
+      .input(z.object({ campaignId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canManageCampaigns(ctx.user)) {
+          throw new Error("Sem permissão");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const camp = await loadCampaignOrThrow(db, input.campaignId);
+        assertEntityTenant(camp as any, user, "Campanha");
+        await db.delete(campaignFiles).where(eq(campaignFiles.campaignId, input.campaignId));
+        await db.delete(campaigns).where(eq(campaigns.id, input.campaignId));
+        return { success: true };
+      }),
+
+    files: protectedProcedure
+      .input(z.object({ campaignId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const camp = await loadCampaignOrThrow(db, input.campaignId);
+        assertEntityTenant(camp as any, ctx.user, "Campanha");
+        return await db.select().from(campaignFiles)
+          .where(eq(campaignFiles.campaignId, input.campaignId))
+          .orderBy(desc(campaignFiles.createdAt));
+      }),
+
+    uploadPdf: protectedProcedure
+      .input(z.object({
+        campaignId: z.number(),
+        filename: z.string().min(1),
+        base64: z.string().min(1),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canManageCampaigns(ctx.user)) {
+          throw new Error("Só Chefes de Equipa e Coordenadores podem carregar PDFs");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const camp = await loadCampaignOrThrow(db, input.campaignId);
+        assertEntityTenant(camp as any, user, "Campanha");
+
+        // Basic validation: only PDFs
+        const lower = input.filename.toLowerCase();
+        if (!lower.endsWith(".pdf")) throw new Error("Apenas PDFs são permitidos");
+
+        const buffer = Buffer.from(input.base64, "base64");
+        // 15MB limit safety (base64 inflates; this is server-side final bytes)
+        if (buffer.byteLength > 15 * 1024 * 1024) {
+          throw new Error("PDF demasiado grande (máx 15MB)");
+        }
+
+        const keyPrefix = `campaigns/${input.campaignId}`;
+        const relKey = `${keyPrefix}/${input.filename}`;
+        const { key, url } = await storagePut(relKey, buffer, "application/pdf");
+
+        await db.insert(campaignFiles).values({
+          campaignId: input.campaignId,
+          storageKey: key,
+          originalName: input.filename,
+          mimeType: "application/pdf",
+          sizeBytes: buffer.byteLength,
+          uploadedBy: user?.id,
         });
 
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "campaign_file_upload",
+          entity: "campaign",
+          entityId: input.campaignId,
+          details: `Upload PDF: ${input.filename}`,
+        });
+
+        return { success: true, url };
+      }),
+
+    removePdf: protectedProcedure
+      .input(z.object({ fileId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canManageCampaigns(ctx.user)) {
+          throw new Error("Sem permissão");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        await db.delete(campaignFiles).where(eq(campaignFiles.id, input.fileId));
         return { success: true };
       }),
   }),
@@ -304,6 +843,206 @@ Regras:
       }),
   }),
 
+  // ============ SUPER ADMIN SETTINGS ============
+  admin: router({
+    getSettings: superAdminProcedure.query(async () => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+
+      const row = await db.select().from(appSettings).limit(1);
+      const s = row[0];
+      if (!s) {
+        return {
+          aiEnabled: true,
+          preferredAiProvider: "openai",
+          openaiApiKey: "",
+          geminiApiKey: "",
+          deepseekApiKey: "",
+          claudeApiKey: "",
+          whatsappEnabled: false,
+          whatsappPhoneNumberId: "",
+          whatsappBusinessAccountId: "",
+          whatsappAccessToken: "",
+          whatsappVerifyToken: "",
+        };
+      }
+
+      return {
+        aiEnabled: s.aiEnabled,
+        preferredAiProvider: s.preferredAiProvider,
+        openaiApiKey: maskSecret(decryptText(s.openaiApiKeyEnc)),
+        geminiApiKey: maskSecret(decryptText(s.geminiApiKeyEnc)),
+        deepseekApiKey: maskSecret(decryptText(s.deepseekApiKeyEnc)),
+        claudeApiKey: maskSecret(decryptText(s.claudeApiKeyEnc)),
+        whatsappEnabled: s.whatsappEnabled,
+        whatsappPhoneNumberId: s.whatsappPhoneNumberId || "",
+        whatsappBusinessAccountId: s.whatsappBusinessAccountId || "",
+        whatsappAccessToken: maskSecret(decryptText(s.whatsappAccessTokenEnc)),
+        whatsappVerifyToken: maskSecret(decryptText(s.whatsappVerifyTokenEnc)),
+      };
+    }),
+
+    updateSettings: superAdminProcedure
+      .input(z.object({
+        aiEnabled: z.boolean().optional(),
+        preferredAiProvider: z.enum(["openai", "gemini", "deepseek", "claude"]).optional(),
+        openaiApiKey: z.string().optional(),
+        geminiApiKey: z.string().optional(),
+        deepseekApiKey: z.string().optional(),
+        claudeApiKey: z.string().optional(),
+        whatsappEnabled: z.boolean().optional(),
+        whatsappAccessToken: z.string().optional(),
+        whatsappPhoneNumberId: z.string().optional(),
+        whatsappBusinessAccountId: z.string().optional(),
+        whatsappVerifyToken: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const existing = await db.select().from(appSettings).limit(1);
+        const update: any = {
+          updatedBy: user?.id,
+        };
+
+        if (input.aiEnabled !== undefined) update.aiEnabled = input.aiEnabled;
+        if (input.preferredAiProvider !== undefined) update.preferredAiProvider = input.preferredAiProvider;
+
+        const setSecret = (field: string, value: string | undefined) => {
+          if (value === undefined) return;
+          const trimmed = value.trim();
+          if (!trimmed) return; // keep existing if empty
+          update[field] = encryptText(trimmed);
+        };
+
+        setSecret("openaiApiKeyEnc", input.openaiApiKey);
+        setSecret("geminiApiKeyEnc", input.geminiApiKey);
+        setSecret("deepseekApiKeyEnc", input.deepseekApiKey);
+        setSecret("claudeApiKeyEnc", input.claudeApiKey);
+
+        if (input.whatsappEnabled !== undefined) update.whatsappEnabled = input.whatsappEnabled;
+        if (input.whatsappPhoneNumberId !== undefined) update.whatsappPhoneNumberId = input.whatsappPhoneNumberId || null;
+        if (input.whatsappBusinessAccountId !== undefined) update.whatsappBusinessAccountId = input.whatsappBusinessAccountId || null;
+        setSecret("whatsappAccessTokenEnc", input.whatsappAccessToken);
+        setSecret("whatsappVerifyTokenEnc", input.whatsappVerifyToken);
+
+        if (existing[0]) {
+          await db.update(appSettings).set(update).where(eq(appSettings.id, existing[0].id));
+        } else {
+          await db.insert(appSettings).values({
+            aiEnabled: update.aiEnabled ?? true,
+            preferredAiProvider: update.preferredAiProvider ?? "openai",
+            openaiApiKeyEnc: update.openaiApiKeyEnc ?? null,
+            geminiApiKeyEnc: update.geminiApiKeyEnc ?? null,
+            deepseekApiKeyEnc: update.deepseekApiKeyEnc ?? null,
+            claudeApiKeyEnc: update.claudeApiKeyEnc ?? null,
+            whatsappEnabled: update.whatsappEnabled ?? false,
+            whatsappAccessTokenEnc: update.whatsappAccessTokenEnc ?? null,
+            whatsappPhoneNumberId: update.whatsappPhoneNumberId ?? null,
+            whatsappBusinessAccountId: update.whatsappBusinessAccountId ?? null,
+            whatsappVerifyTokenEnc: update.whatsappVerifyTokenEnc ?? null,
+            updatedBy: user?.id,
+          } as any);
+        }
+
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "settings_update",
+          entity: "appSettings",
+          details: "Atualizou configurações do sistema",
+        });
+
+        return { success: true };
+      }),
+
+    purgeData: superAdminProcedure
+      .input(z.object({
+        scope: z.enum(["all_except_audit", "crm_only"]).default("all_except_audit"),
+        confirm: z.string(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.confirm !== "APAGAR") {
+          throw new Error("Confirmação inválida. Escreva APAGAR.");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        // Never delete auditLogs.
+        const tables =
+          input.scope === "crm_only"
+            ? [
+                "callLogs",
+                "pendentes",
+                "contacts",
+                "contracts",
+                "sales",
+                "blacklist",
+                "sosRequests",
+                "gamification",
+                "calendarEvents",
+                "campaignFiles",
+                "campaigns",
+              ]
+            : [
+                "callLogs",
+                "pendentes",
+                "contacts",
+                "contracts",
+                "sales",
+                "blacklist",
+                "sosRequests",
+                "gamification",
+                "calendarEvents",
+                "campaignFiles",
+                "campaigns",
+                "competitorScripts",
+                "contactOrigins",
+                "energyCalculations",
+                "energyConfig",
+                "teams",
+                "appSettings",
+                "users",
+              ];
+
+        await db.execute(sql`SET FOREIGN_KEY_CHECKS=0`);
+        for (const t of tables) {
+          await db.execute(sql.raw(`DELETE FROM \`${t}\``));
+        }
+        await db.execute(sql`SET FOREIGN_KEY_CHECKS=1`);
+
+        // Ensure current super admin still exists (if scope was all)
+        if (input.scope === "all_except_audit") {
+          // Recreate current user minimal record so they don't lock themselves out.
+          await db.insert(users).values({
+            openId: user.openId,
+            name: user.name ?? "Super Admin",
+            email: user.email ?? null,
+            loginMethod: user.loginMethod ?? null,
+            role: "admin",
+            crmRole: "coordenador",
+            isSuperAdmin: true,
+          } as any).onDuplicateKeyUpdate({
+            set: {
+              role: "admin",
+              crmRole: "coordenador",
+              isSuperAdmin: true,
+            } as any,
+          });
+        }
+
+        await db.insert(auditLogs).values({
+          userId: user?.id ?? 0,
+          action: "purge_data",
+          entity: "system",
+          details: `Purge: ${input.scope}`,
+        } as any);
+
+        return { success: true };
+      }),
+  }),
+
   // ============ CALL LOGS ============
   calls: router({
     log: protectedProcedure
@@ -318,6 +1057,8 @@ Regras:
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
+        await assertContactAccessible(db, input.contactId, user);
+
         await db.insert(callLogs).values({
           contactId: input.contactId,
           vendedorId: user?.id,
@@ -325,7 +1066,6 @@ Regras:
           notes: input.notes || null,
         });
 
-        // Update contact status and attempts
         const statusMap: Record<string, string> = {
           atendeu: "em_contacto",
           nao_atende: "nao_atende",
@@ -350,10 +1090,33 @@ Regras:
   dashboard: router({
     stats: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
-      if (!db) return { callsToday: 0, pendentesToday: 0, salesMonth: 0, totalContacts: 0 };
+      if (!db) {
+        return {
+          callsToday: 0,
+          pendentesToday: 0,
+          overduePendenteCount: 0,
+          salesMonth: 0,
+          totalContacts: 0,
+          salesPipeline: { aguarda_instalacao: 0, em_aberto: 0, activo: 0, e_switch: 0, cancelado: 0 },
+          pendenteAlerts: [] as Array<{
+            id: number;
+            contactId: number;
+            returnDate: Date;
+            contactPhone: string | null;
+            contactName: string | null;
+          }>,
+          rankingPosition: null as number | null,
+        };
+      }
       const user = ctx.user as any;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
+
+      const sellerIds = await getUserIdsInTenant(db, user);
+      const tenantCallLogs = whereInTenantUserIds(sellerIds, callLogs.vendedorId);
+      const tenantPendentesV = whereInTenantUserIds(sellerIds, pendentes.vendedorId);
+      const tenantSalesV = whereInTenantUserIds(sellerIds, sales.vendedorId);
+      const contactTenant = whereContactsForUser(user);
 
       // Calls today
       let callsResult;
@@ -361,8 +1124,10 @@ Regras:
         callsResult = await db.select({ count: sql<number>`COUNT(*)` }).from(callLogs)
           .where(and(eq(callLogs.vendedorId, user.id), sql`${callLogs.calledAt} >= ${today}`));
       } else {
+        const cparts: SQL[] = [sql`${callLogs.calledAt} >= ${today}`];
+        if (tenantCallLogs) cparts.push(tenantCallLogs);
         callsResult = await db.select({ count: sql<number>`COUNT(*)` }).from(callLogs)
-          .where(sql`${callLogs.calledAt} >= ${today}`);
+          .where(and(...cparts));
       }
 
       // Pendentes for today
@@ -378,30 +1143,109 @@ Regras:
             sql`${pendentes.returnDate} < ${tomorrow}`
           ));
       } else {
+        const pparts: SQL[] = [
+          eq(pendentes.status, "agendado"),
+          sql`${pendentes.returnDate} >= ${today}`,
+          sql`${pendentes.returnDate} < ${tomorrow}`,
+        ];
+        if (tenantPendentesV) pparts.push(tenantPendentesV);
         pendentesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
-          .where(and(
-            eq(pendentes.status, "agendado"),
-            sql`${pendentes.returnDate} >= ${today}`,
-            sql`${pendentes.returnDate} < ${tomorrow}`
-          ));
+          .where(and(...pparts));
       }
 
-      // Sales this month
-      const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-      let salesResult;
+      // Pendentes em atraso (agendados com data já passada)
+      const now = new Date();
+      const overdueConditions: SQL[] = [
+        eq(pendentes.status, "agendado"),
+        sql`${pendentes.returnDate} < ${now}`,
+      ];
+      if (user?.crmRole === "vendedor") overdueConditions.push(eq(pendentes.vendedorId, user.id));
+      else if (tenantPendentesV) overdueConditions.push(tenantPendentesV);
+      const overdueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
+        .where(and(...overdueConditions));
+
+      const alertParts = [...overdueConditions];
+      if (contactTenant) alertParts.push(contactTenant);
+      let alertQuery = db.select({
+        id: pendentes.id,
+        contactId: pendentes.contactId,
+        returnDate: pendentes.returnDate,
+        contactPhone: contacts.phone,
+        contactName: contacts.name,
+      }).from(pendentes).leftJoin(contacts, eq(pendentes.contactId, contacts.id))
+        .where(and(...alertParts))
+        .orderBy(asc(pendentes.returnDate))
+        .limit(12);
+
+      const pendenteAlerts = await alertQuery;
+
+      const mo = today.getMonth() + 1;
+      const yr = today.getFullYear();
+      let activeInstallConditions: SQL[] = [
+        eq(sales.status, "activo"),
+        sql`${sales.installationDate} IS NOT NULL`,
+        sql`MONTH(${sales.installationDate}) = ${mo}`,
+        sql`YEAR(${sales.installationDate}) = ${yr}`,
+      ];
+      if (user?.crmRole === "vendedor") activeInstallConditions.push(eq(sales.vendedorId, user.id));
+      else if (tenantSalesV) activeInstallConditions.push(tenantSalesV);
+
+      const salesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(sales)
+        .where(and(...activeInstallConditions));
+
+      const pipeSelect = db.select({
+        status: sales.status,
+        cnt: sql<number>`count(*)`,
+      }).from(sales);
+      let pipeRows: any[];
       if (user?.crmRole === "vendedor") {
-        salesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(sales)
-          .where(and(eq(sales.vendedorId, user.id), sql`${sales.closedAt} >= ${monthStart}`));
+        pipeRows = await pipeSelect.where(eq(sales.vendedorId, user.id)).groupBy(sales.status);
+      } else if (tenantSalesV) {
+        pipeRows = await pipeSelect.where(tenantSalesV).groupBy(sales.status);
       } else {
-        salesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(sales)
-          .where(sql`${sales.closedAt} >= ${monthStart}`);
+        pipeRows = await pipeSelect.groupBy(sales.status);
       }
+
+      const salesPipeline = {
+        aguarda_instalacao: 0,
+        em_aberto: 0,
+        activo: 0,
+        e_switch: 0,
+        cancelado: 0,
+      } as Record<string, number>;
+      for (const row of pipeRows as any[]) {
+        if (row.status in salesPipeline) salesPipeline[row.status] = Number(row.cnt);
+      }
+
+      // Posição no ranking (vendas activas com instalação no mês atual)
+      let rankingPosition: number | null = null;
+      const rankBase: SQL[] = [
+        eq(sales.status, "activo"),
+        sql`${sales.installationDate} IS NOT NULL`,
+        sql`MONTH(${sales.installationDate}) = ${mo}`,
+        sql`YEAR(${sales.installationDate}) = ${yr}`,
+      ];
+      if (tenantSalesV) rankBase.push(tenantSalesV);
+      const rankCounts = await db.select({
+        vendedorId: sales.vendedorId,
+        cnt: sql<number>`count(*)`,
+      }).from(sales).where(and(...rankBase))
+        .groupBy(sales.vendedorId)
+        .orderBy(desc(sql`count(*)`));
+
+      const sorted = [...rankCounts] as Array<{ vendedorId: number; cnt: number }>;
+      const idx = sorted.findIndex(r => r.vendedorId === user?.id);
+      if (idx >= 0) rankingPosition = idx + 1;
 
       return {
         callsToday: callsResult[0]?.count || 0,
         pendentesToday: pendentesResult[0]?.count || 0,
+        overduePendenteCount: overdueResult[0]?.count || 0,
         salesMonth: salesResult[0]?.count || 0,
         totalContacts: 0,
+        salesPipeline,
+        pendenteAlerts,
+        rankingPosition,
       };
     }),
   }),
@@ -417,22 +1261,25 @@ Regras:
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-      const result = await db.select().from(contacts)
-        .where(
-          and(
-            eq(contacts.status, "novo"),
-            or(
-              sql`${contacts.lastAssignedAt} IS NULL`,
-              sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`
-            )
-          )
-        )
+      const tcond = whereContactsForUser(user);
+      const cand: SQL[] = [
+        eq(contacts.status, "novo"),
+        or(
+          sql`${contacts.lastAssignedAt} IS NULL`,
+          sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`,
+        ) as SQL,
+      ];
+      if (tcond) cand.unshift(tcond);
+
+      const result = await db
+        .select()
+        .from(contacts)
+        .where(and(...cand))
         .limit(1);
 
       if (result.length === 0) return null;
 
       const contact = result[0];
-      // Assign to current user
       await db.update(contacts).set({
         assignedTo: user?.id,
         lastAssignedAt: new Date(),
@@ -445,16 +1292,248 @@ Regras:
     repescagem: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
-      // Get contacts that didn't answer after 3+ attempts
-      return await db.select().from(contacts)
-        .where(
-          and(
-            eq(contacts.status, "nao_atende"),
-            sql`${contacts.attempts} >= 3`
-          )
-        )
+      const user = ctx.user as any;
+      const tcond = whereContactsForUser(user);
+      const parts: SQL[] = [eq(contacts.status, "nao_atende"), sql`${contacts.attempts} >= 3`];
+      if (tcond) parts.unshift(tcond);
+      return await db
+        .select()
+        .from(contacts)
+        .where(and(...parts))
         .orderBy(desc(contacts.lastAttemptAt))
         .limit(20);
+    }),
+  }),
+
+  // ============ DIALER ============
+  dialer: router({
+    next: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return null;
+      const user = ctx.user as any;
+      if (user?.crmRole !== "vendedor") throw new Error("Apenas vendedores");
+
+      // 1) Prioritize due pendentes (returnDate <= now)
+      const now = new Date();
+      const pT = whereContactsForUser(user);
+      const dueWhere: SQL[] = [
+        eq(pendentes.vendedorId, user.id),
+        eq(pendentes.status, "agendado"),
+        sql`${pendentes.returnDate} <= ${now}`,
+      ];
+      if (pT) dueWhere.push(pT);
+
+      const due = await db
+        .select({ pendente: pendentes })
+        .from(pendentes)
+        .innerJoin(contacts, eq(pendentes.contactId, contacts.id))
+        .where(and(...dueWhere))
+        .orderBy(desc(pendentes.returnDate))
+        .limit(1);
+
+      const dueRow = due[0]?.pendente;
+      if (dueRow) {
+        const contact = await db.select().from(contacts).where(eq(contacts.id, dueRow.contactId)).limit(1);
+        if (contact[0]) {
+          await db.update(users).set({
+            dialerState: "ready",
+            dialerContactId: contact[0].id,
+            dialerSource: "pendente",
+            dialerUpdatedAt: new Date(),
+          } as any).where(eq(users.id, user.id));
+          return { source: "pendente", pendente: dueRow, contact: contact[0] };
+        }
+      }
+
+      // 2) Else: use distribution.getNext logic (reuse here)
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const dq: SQL[] = [
+        eq(contacts.status, "novo"),
+        or(
+          sql`${contacts.lastAssignedAt} IS NULL`,
+          sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`,
+        ) as SQL,
+      ];
+      const dtc = whereContactsForUser(user);
+      if (dtc) dq.unshift(dtc);
+      const result = await db
+        .select()
+        .from(contacts)
+        .where(and(...dq))
+        .limit(1);
+      if (result.length === 0) return null;
+
+      const c = result[0];
+      await db.update(contacts).set({
+        assignedTo: user?.id,
+        lastAssignedAt: new Date(),
+        status: "em_contacto",
+      }).where(eq(contacts.id, c.id));
+
+      await db.update(users).set({
+        dialerState: "ready",
+        dialerContactId: c.id,
+        dialerSource: "queue",
+        dialerUpdatedAt: new Date(),
+      } as any).where(eq(users.id, user.id));
+
+      return { source: "queue", contact: c };
+    }),
+
+    outcome: protectedProcedure
+      .input(z.object({
+        contactId: z.number(),
+        outcome: z.enum(["atendeu", "nao_atende"]),
+        notes: z.string().optional(),
+        // for atendeu
+        disposition: z.enum(["lead", "pendente"]).optional(),
+        pendenteReturnDate: z.string().optional(),
+        pendenteNotes: z.string().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (user?.crmRole !== "vendedor") throw new Error("Apenas vendedores");
+
+        await assertContactAccessible(db, input.contactId, user);
+
+        await db.insert(callLogs).values({
+          contactId: input.contactId,
+          vendedorId: user?.id,
+          outcome: input.outcome as any,
+          notes: input.notes || null,
+        });
+
+        if (input.outcome === "nao_atende") {
+          await db.update(contacts).set({
+            status: "nao_atende",
+            attempts: sql`attempts + 1`,
+            lastAttemptAt: new Date(),
+          }).where(eq(contacts.id, input.contactId));
+        } else {
+          // atendeu requires disposition
+          if (!input.disposition) throw new Error("Selecione Lead ou Pendente");
+
+          if (input.disposition === "lead") {
+            await db.update(contacts).set({
+              status: "em_contacto",
+              isLead: true,
+              notes: input.notes || null,
+              lastAttemptAt: new Date(),
+              attempts: sql`attempts + 1`,
+            } as any).where(eq(contacts.id, input.contactId));
+          } else {
+            if (!input.pendenteReturnDate) throw new Error("Defina data de retorno");
+            await db.insert(pendentes).values({
+              contactId: input.contactId,
+              vendedorId: user?.id,
+              returnDate: new Date(input.pendenteReturnDate),
+              notes: input.pendenteNotes || input.notes || null,
+              offerDesired: null,
+              status: "agendado",
+            } as any);
+            await db.update(contacts).set({
+              status: "pendente",
+              lastAttemptAt: new Date(),
+              attempts: sql`attempts + 1`,
+              notes: input.notes || null,
+            } as any).where(eq(contacts.id, input.contactId));
+          }
+        }
+
+        // Clear current dialer contact -> forces next ping
+        await db.update(users).set({
+          dialerState: "idle",
+          dialerContactId: null,
+          dialerUpdatedAt: new Date(),
+        } as any).where(eq(users.id, user.id));
+
+        return { success: true };
+      }),
+  }),
+
+  // ============ SUPERVISION ============
+  supervision: router({
+    teamStatus: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+
+      if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) return [];
+
+      // Coordenador: visão global. CE / CEJ: só membros da mesma equipa (teamId ou, para CE, via teams.leaderId).
+      let q = db.select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        crmRole: users.crmRole,
+        teamId: users.teamId,
+        isOnline: users.isOnline,
+        dialerState: (users as any).dialerState,
+        dialerContactId: (users as any).dialerContactId,
+        dialerSource: (users as any).dialerSource,
+        dialerUpdatedAt: (users as any).dialerUpdatedAt,
+        presenceSessionStartedAt: users.presenceSessionStartedAt,
+        lastSeenIp: users.lastSeenIp,
+        lastSeenUserAgent: users.lastSeenUserAgent,
+        lastSeenGeo: users.lastSeenGeo,
+      }).from(users);
+
+      const uw = whereUsersForUser(user as any);
+      const parts: SQL[] = [];
+      if (uw) parts.push(uw);
+
+      if (user?.crmRole === "coordenador") {
+        if (parts.length) q = (q as any).where(and(...parts));
+        const rows = await (q as any);
+        return rows.map((r: Record<string, unknown>) => ({
+          ...r,
+          deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
+        }));
+      }
+
+      const scopeId = await resolveUserTeamScopeId(db, {
+        id: user.id,
+        teamId: user.teamId ?? null,
+        crmRole: user.crmRole,
+      });
+
+      if (scopeId == null) return [];
+
+      parts.push(eq(users.teamId, scopeId));
+      q = (q as any).where(and(...parts));
+
+      const rows = await (q as any);
+      return rows.map((r: Record<string, unknown>) => ({
+        ...r,
+        deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
+      }));
+    }),
+
+    alerts: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      if (!["cej", "ce", "coordenador"].includes(user?.crmRole)) return [];
+
+      const now = new Date();
+      const overdue: SQL[] = [
+        eq(pendentes.status, "agendado"),
+        sql`${pendentes.returnDate} <= ${now}`,
+      ];
+      const pten = whereContactsForUser(user as any);
+      if (pten) overdue.push(pten);
+      const due = await db
+        .select({ p: pendentes })
+        .from(pendentes)
+        .innerJoin(contacts, eq(pendentes.contactId, contacts.id))
+        .where(and(...overdue))
+        .orderBy(desc(pendentes.returnDate))
+        .limit(50);
+
+      return due.map((row) => row.p);
     }),
   }),
 
@@ -467,16 +1546,24 @@ Regras:
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
+        const tid = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && tid == null) {
+          throw new Error("Conta sem empresa; não pode gerir lista negra.");
+        }
+
         await db.insert(blacklist).values({
           phone: input.phone,
+          tenantId: tid,
           reason: input.reason || null,
           addedBy: user?.id,
-        });
+        } as any);
 
-        // Update contact status
+        const bu: SQL[] = [eq(contacts.phone, input.phone)];
+        const cten = whereContactsForUser(user);
+        if (cten) bu.push(cten);
         await db.update(contacts)
           .set({ status: "blacklist" })
-          .where(eq(contacts.phone, input.phone));
+          .where(and(...bu));
 
         return { success: true };
       }),
@@ -484,19 +1571,50 @@ Regras:
 
   // ============ GAMIFICATION ============
   gamification: router({
-    ranking: protectedProcedure.query(async () => {
+    ranking: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
+      const user = ctx.user as any;
       const now = new Date();
-      return await db.select().from(gamification)
-        .where(
-          and(
-            eq(gamification.month, now.getMonth() + 1),
-            eq(gamification.year, now.getFullYear())
-          )
-        )
-        .orderBy(desc(gamification.points))
+      const mo = now.getMonth() + 1;
+      const yr = now.getFullYear();
+
+      const sellerIds = await getUserIdsInTenant(db, user);
+      const tenantV = whereInTenantUserIds(sellerIds, sales.vendedorId);
+
+      const parts: SQL[] = [
+        eq(sales.status, "activo"),
+        sql`${sales.installationDate} IS NOT NULL`,
+        sql`MONTH(${sales.installationDate}) = ${mo}`,
+        sql`YEAR(${sales.installationDate}) = ${yr}`,
+      ];
+      if (tenantV) parts.push(tenantV);
+
+      const counts = await db.select({
+        userId: sales.vendedorId,
+        activoSales: sql<number>`count(*)`,
+      }).from(sales)
+        .where(and(...parts))
+        .groupBy(sales.vendedorId)
+        .orderBy(desc(sql`count(*)`))
         .limit(20);
+
+      if (!counts.length) return [];
+
+      const ids = counts.map(c => c.userId);
+      const nameRows = await db.select({ id: users.id, name: users.name }).from(users)
+        .where(inArray(users.id, ids));
+      const nameMap = Object.fromEntries(nameRows.map(r => [r.id, r.name]));
+
+      return counts.map((c, position) => ({
+        position: position + 1,
+        userId: c.userId,
+        userName: nameMap[c.userId] || `Utilizador #${c.userId}`,
+        activoSales: Number(c.activoSales),
+        points: Number(c.activoSales),
+        totalSales: Number(c.activoSales),
+        totalCalls: 0,
+      }));
     }),
   }),
 
@@ -507,19 +1625,53 @@ Regras:
       .query(async ({ input }) => {
         const db = await getDb();
         if (!db) return [];
-        return await db.select().from(auditLogs)
+        const rows = await db
+          .select({
+            id: auditLogs.id,
+            userId: auditLogs.userId,
+            actorName: users.name,
+            actorEmail: users.email,
+            action: auditLogs.action,
+            entity: auditLogs.entity,
+            entityId: auditLogs.entityId,
+            details: auditLogs.details,
+            createdAt: auditLogs.createdAt,
+          })
+          .from(auditLogs)
+          .leftJoin(users, eq(auditLogs.userId, users.id))
           .orderBy(desc(auditLogs.createdAt))
           .limit(input?.limit || 50);
+
+        return rows.map((r) => ({
+          id: r.id,
+          userId: r.userId,
+          actorLabel:
+            r.actorName?.trim() ||
+            r.actorEmail?.trim() ||
+            (r.userId > 0 ? `Utilizador #${r.userId}` : "Sistema"),
+          action: r.action,
+          entity: r.entity,
+          entityId: r.entityId,
+          details: r.details,
+          createdAt: r.createdAt,
+        }));
       }),
   }),
 
   // ============ COMPETITOR SCRIPTS ============
   scripts: router({
-    list: protectedProcedure.query(async () => {
+    list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
-      return await db.select().from(competitorScripts)
-        .orderBy(desc(competitorScripts.createdAt));
+      const user = ctx.user as any;
+      let q = db.select().from(competitorScripts);
+      const st = isSuperAdminUser(user)
+        ? undefined
+        : user.tenantId != null
+          ? eq(competitorScripts.tenantId, user.tenantId)
+          : sql`1=0`;
+      if (st) q = (q as any).where(st);
+      return await (q as any).orderBy(desc(competitorScripts.createdAt));
     }),
     create: protectedProcedure
       .input(z.object({
@@ -533,13 +1685,17 @@ Regras:
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
+        const tid = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && tid == null) throw new Error("Conta sem empresa.");
+
         await db.insert(competitorScripts).values({
           competitor: input.competitor,
           weakness: input.weakness,
           ourStrength: input.ourStrength,
           product: input.product,
           createdBy: user?.id,
-        });
+          tenantId: tid,
+        } as any);
 
         return { success: true };
       }),
@@ -557,13 +1713,16 @@ Regras:
         const month = input?.month || (now.getMonth() + 1);
         const year = input?.year || now.getFullYear();
 
-        let conditions: any[] = [
+        let conditions: SQL[] = [
           sql`MONTH(${sales.closedAt}) = ${month}`,
           sql`YEAR(${sales.closedAt}) = ${year}`,
         ];
 
         if (user?.crmRole === "vendedor") {
           conditions.push(eq(sales.vendedorId, user.id));
+        } else {
+          const tenantV = whereInTenantUserIds(await getUserIdsInTenant(db, user), sales.vendedorId);
+          if (tenantV) conditions.push(tenantV);
         }
 
         return await db.select().from(sales)
@@ -583,6 +1742,8 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+
+        await assertContactAccessible(db, input.contactId, user);
 
         await db.insert(sales).values({
           contactId: input.contactId,
@@ -612,6 +1773,52 @@ Regras:
 
         return { success: true };
       }),
+
+    update: protectedProcedure
+      .input(z.object({
+        saleId: z.number(),
+        status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).optional(),
+        installationDate: z.string().optional().nullable(),
+        cancelReason: z.string().optional().nullable(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canManageSalesLifecycle(ctx.user)) {
+          throw new Error("Sem permissão para atualizar estado da venda");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const row = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        const s = row[0];
+        if (!s) throw new Error("Venda não encontrada");
+
+        await assertContactAccessible(db, s.contactId, user);
+
+        const patch: Record<string, unknown> = {};
+        if (input.status !== undefined) patch.status = input.status;
+        if (input.cancelReason !== undefined) patch.cancelReason = input.cancelReason;
+        if (input.installationDate !== undefined) {
+          patch.installationDate = input.installationDate ? new Date(input.installationDate) : null;
+        }
+        const nextStatus = input.status !== undefined ? input.status : s.status;
+        const nextInstallationDate =
+          input.installationDate !== undefined
+            ? (input.installationDate ? new Date(input.installationDate) : null)
+            : s.installationDate;
+        if (nextStatus === "activo" && !nextInstallationDate) {
+          throw new Error("Defina a data de instalação ao marcar como Activo");
+        }
+        await db.update(sales).set(patch as any).where(eq(sales.id, input.saleId));
+
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "sale_updated",
+          entity: "sale",
+          entityId: input.saleId,
+          details: `Atualizou venda #${input.saleId}`,
+        });
+        return { success: true };
+      }),
   }),
 
   // ============ SESSION / PAUSE ============
@@ -620,11 +1827,36 @@ Regras:
       const db = await getDb();
       if (!db) throw new Error("Database not available");
       const user = ctx.user as any;
-      await db.update(users).set({
-        isOnline: true,
-        lastOnlineAt: new Date(),
-        pauseStartedAt: null,
-      }).where(eq(users.id, user.id));
+      const ip = getClientIp(ctx.req as any);
+      const ua = getClientUserAgent(ctx.req as any);
+
+      const [before] = await db
+        .select({ isOnline: users.isOnline, lastSeenIp: users.lastSeenIp })
+        .from(users)
+        .where(eq(users.id, user.id))
+        .limit(1);
+      const wasOffline = before ? !before.isOnline : true;
+      const ipChanged = (before?.lastSeenIp ?? "") !== (ip || "");
+
+      await db
+        .update(users)
+        .set({
+          isOnline: true,
+          lastOnlineAt: new Date(),
+          pauseStartedAt: null,
+          lastSeenIp: ip || null,
+          lastSeenUserAgent: ua || null,
+          ...(wasOffline ? { presenceSessionStartedAt: new Date() } : {}),
+        } as any)
+        .where(eq(users.id, user.id));
+
+      if (ip && (wasOffline || ipChanged)) {
+        void lookupGeoLabel(ip).then((geo) => {
+          if (!geo) return;
+          void db.update(users).set({ lastSeenGeo: geo } as any).where(eq(users.id, user.id));
+        });
+      }
+
       return { success: true };
     }),
     goOffline: protectedProcedure.mutation(async ({ ctx }) => {
@@ -671,10 +1903,17 @@ Regras:
 
   // ============ ORIGINS ============
   origins: router({
-    list: protectedProcedure.query(async () => {
+    list: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
-      return await db.select().from(contactOrigins).orderBy(contactOrigins.name);
+      const user = ctx.user as any;
+      let q = db.select().from(contactOrigins);
+      if (!isSuperAdminUser(user) && user.tenantId != null) {
+        q = (q as any).where(eq(contactOrigins.tenantId, user.tenantId));
+      } else if (!isSuperAdminUser(user)) {
+        q = (q as any).where(sql`1=0`);
+      }
+      return await (q as any).orderBy(contactOrigins.name);
     }),
     create: protectedProcedure
       .input(z.object({ name: z.string().min(1) }))
@@ -682,20 +1921,47 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
-        // Only CEJ/CE/CO can manage origins
         if (user?.crmRole === "vendedor") throw new Error("Sem permissão");
-        await db.insert(contactOrigins).values({ name: input.name, createdBy: user?.id });
+        const oid = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && oid == null) throw new Error("Conta sem empresa.");
+        await db.insert(contactOrigins).values({ name: input.name, createdBy: user?.id, tenantId: oid } as any);
         return { success: true };
       }),
   }),
 
   // ============ ENERGY CONFIG ============
   energy: router({
-    getConfig: protectedProcedure.query(async () => {
+    getConfig: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return null;
-      const result = await db.select().from(energyConfig).limit(1);
-      return result[0] || null;
+      const user = ctx.user as any;
+
+      if (isSuperAdminUser(user)) {
+        const r = await db
+          .select()
+          .from(energyConfig)
+          .where(sql`${energyConfig.tenantCoordinatorUserId} IS NULL`)
+          .limit(1);
+        const row = r[0];
+        return row ?? (await db.select().from(energyConfig).limit(1))[0] ?? null;
+      }
+
+      const tid = user?.tenantId;
+      if (tid == null) return null;
+
+      const own = await db
+        .select()
+        .from(energyConfig)
+        .where(eq(energyConfig.tenantCoordinatorUserId, tid))
+        .limit(1);
+      if (own[0]) return own[0];
+
+      const template = await db
+        .select()
+        .from(energyConfig)
+        .where(sql`${energyConfig.tenantCoordinatorUserId} IS NULL`)
+        .limit(1);
+      return template[0] ?? null;
     }),
     updateConfig: protectedProcedure
       .input(z.object({
@@ -711,17 +1977,198 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
-        if (user?.crmRole !== 'coordenador') throw new Error("Apenas o Coordenador pode alterar a configuração");
-        await db.update(energyConfig).set({
-          ...input,
+        if (user?.crmRole !== "coordenador") throw new Error("Apenas o Coordenador pode alterar a configuração");
+
+        const tid = user.tenantId;
+        if (tid == null) throw new Error("Coordenador sem tenantId.");
+
+        const own = await db
+          .select()
+          .from(energyConfig)
+          .where(eq(energyConfig.tenantCoordinatorUserId, tid))
+          .limit(1);
+
+        if (own[0]) {
+          await db
+            .update(energyConfig)
+            .set({ ...input, updatedBy: user?.id })
+            .where(eq(energyConfig.id, own[0].id));
+          return { success: true };
+        }
+
+        const template = await db
+          .select()
+          .from(energyConfig)
+          .where(sql`${energyConfig.tenantCoordinatorUserId} IS NULL`)
+          .limit(1);
+        const t = template[0];
+        if (!t) throw new Error("Sem modelo global de tarifário na base.");
+
+        await db.insert(energyConfig).values({
+          tenantCoordinatorUserId: tid,
+          priceKwhSimples: input.priceKwhSimples,
+          priceKwhBiHorariaPonta: input.priceKwhBiHorariaPonta,
+          priceKwhBiHorariaVazio: input.priceKwhBiHorariaVazio,
+          baseDiscountPercent: input.baseDiscountPercent,
+          vdfClientExtraPercent: input.vdfClientExtraPercent,
+          vdfGasClientExtraPercent: input.vdfGasClientExtraPercent,
+          reembolsoPercent: input.reembolsoPercent,
           updatedBy: user?.id,
-        }).where(eq(energyConfig.id, 1));
+        } as any);
         return { success: true };
+      }),
+  }),
+
+  // ============ TEAMS (hierarquia / e-mail por equipa — não há tenant isolado) ============
+  teams: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      if (!canManageTeamsTable(user)) return [];
+      let q = db.select().from(teams);
+      if (!isSuperAdminUser(user) && user.tenantId != null) {
+        q = (q as any).where(eq(teams.tenantId, user.tenantId));
+      } else if (!isSuperAdminUser(user)) {
+        q = (q as any).where(sql`1=0`);
+      }
+      return await (q as any).orderBy(asc(teams.name));
+    }),
+
+    mine: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return null;
+      const user = ctx.user as any;
+      const canSeeMine =
+        user?.isSuperAdmin ||
+        user?.crmRole === "coordenador" ||
+        ["ce", "cej"].includes(user?.crmRole);
+      if (!canSeeMine) return null;
+      if (user?.crmRole === "coordenador" || user?.isSuperAdmin) return null;
+
+      const scopeId = await resolveUserTeamScopeId(db, {
+        id: user.id,
+        teamId: user.teamId ?? null,
+        crmRole: user.crmRole,
+      });
+      if (scopeId == null) return null;
+      const tmCond: SQL[] = [eq(teams.id, scopeId)];
+      if (!isSuperAdminUser(user) && user.tenantId != null) tmCond.push(eq(teams.tenantId, user.tenantId));
+      const row = await db.select().from(teams).where(and(...tmCond)).limit(1);
+      return row[0] ?? null;
+    }),
+
+    create: protectedProcedure
+      .input(
+        z.object({
+          name: z.string().min(1).max(255),
+          leaderId: z.number().int().positive().optional().nullable(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (!canManageTeamsTable(user)) throw new Error("Apenas Coordenadores ou Super Admin podem criar equipas");
+
+        const teamTid = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && teamTid == null) throw new Error("Coordenador sem empresa (tenantId).");
+
+        const name = input.name.trim();
+        await db.insert(teams).values({
+          name,
+          leaderId: input.leaderId ?? null,
+          tenantId: teamTid,
+        } as any);
+
+        const created = await db.select({ id: teams.id }).from(teams).orderBy(desc(teams.id)).limit(1);
+        return { id: created[0]?.id ?? 0 };
+      }),
+
+    updateContactEmail: protectedProcedure
+      .input(
+        z.object({
+          teamId: z.number().int(),
+          contactEmail: z.union([z.string().email(), z.literal("")]).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const raw = typeof input.contactEmail === "string" ? input.contactEmail.trim() : undefined;
+        const emailVal =
+          raw === undefined || raw === "" ? null : raw;
+
+        const [tm] = await db.select().from(teams).where(eq(teams.id, input.teamId)).limit(1);
+        if (!tm) throw new Error("Equipa não encontrada");
+
+        if (canManageTeamsTable(user)) {
+          assertEntityTenant(tm as any, user, "Equipa");
+          await db.update(teams).set({ contactEmail: emailVal }).where(eq(teams.id, input.teamId));
+          return { success: true as const };
+        }
+
+        if (!["ce", "cej"].includes(user?.crmRole ?? "")) {
+          throw new Error("Sem permissão para alterar esta equipa");
+        }
+
+        const scopeId = await resolveUserTeamScopeId(db, {
+          id: user.id,
+          teamId: user.teamId ?? null,
+          crmRole: user.crmRole,
+        });
+
+        if (scopeId !== input.teamId) {
+          throw new Error("Só pode definir o e-mail da própria equipa");
+        }
+        assertEntityTenant(tm as any, user, "Equipa");
+
+        await db.update(teams).set({ contactEmail: emailVal }).where(eq(teams.id, input.teamId));
+        return { success: true as const };
       }),
   }),
 
   // ============ SOS ============
   sos: router({
+    /** Pedidos SOS abertos — só supervisão / coordenação / Super Admin, isolados por tenant. */
+    openList: protectedProcedure.query(async ({ ctx }) => {
+      const user = ctx.user as any;
+      if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) {
+        return [];
+      }
+      const db = await getDb();
+      if (!db) return [];
+      const tcond = whereSosRequestsForUser(user as any);
+      const statusOpen = eq(sosRequests.status, "aberto");
+      const whereClause = tcond ? and(statusOpen, tcond) : statusOpen;
+
+      const rows = await db
+        .select({
+          id: sosRequests.id,
+          vendedorId: sosRequests.vendedorId,
+          vendedorName: users.name,
+          contactId: sosRequests.contactId,
+          message: sosRequests.message,
+          createdAt: sosRequests.createdAt,
+        })
+        .from(sosRequests)
+        .innerJoin(users, eq(sosRequests.vendedorId, users.id))
+        .where(whereClause as SQL)
+        .orderBy(desc(sosRequests.createdAt))
+        .limit(50);
+
+      return rows.map((r) => ({
+        id: r.id,
+        vendedorId: r.vendedorId,
+        vendedorName: r.vendedorName,
+        contactId: r.contactId,
+        message: r.message,
+        createdAt: r.createdAt,
+      }));
+    }),
+
     create: protectedProcedure
       .input(z.object({
         contactId: z.number().optional(),
@@ -731,13 +2178,27 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+        if (!user?.id) throw new Error("Sessão inválida");
+
+        let tenantIdForRow: number | null = null;
+        if (!isSuperAdminUser(user)) {
+          if (user.tenantId == null || Number.isNaN(Number(user.tenantId))) {
+            throw new Error("Conta sem empresa (tenant); não pode registar SOS.");
+          }
+          tenantIdForRow = Number(user.tenantId);
+        }
+
+        if (input.contactId != null) {
+          await assertContactAccessible(db, input.contactId, user);
+        }
 
         await db.insert(sosRequests).values({
-          vendedorId: user?.id,
+          tenantId: tenantIdForRow,
+          vendedorId: user.id,
           contactId: input.contactId || null,
           message: input.message || "Preciso de ajuda!",
           status: "aberto",
-        });
+        } as any);
 
         return { success: true };
       }),

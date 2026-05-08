@@ -1,4 +1,3 @@
-import { jsxLocPlugin } from "@builder.io/vite-plugin-jsx-loc";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import fs from "node:fs";
@@ -150,7 +149,7 @@ function vitePluginManusDebugCollector(): Plugin {
   };
 }
 
-const plugins = [react(), tailwindcss(), jsxLocPlugin(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
+const plugins = [react(), tailwindcss(), vitePluginManusRuntime(), vitePluginManusDebugCollector()];
 
 export default defineConfig({
   plugins,
@@ -167,6 +166,26 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          /** React 19 + Radix: chunk separado "radix" quebra inicialização (`Activity`). Manter Radix junto ao React. */
+          if (
+            /[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id) ||
+            /[\\/]node_modules[\\/]@radix-ui[\\/]/.test(id) ||
+            /[\\/]node_modules[\\/]@floating-ui[\\/]/.test(id)
+          ) {
+            return "react-vendor";
+          }
+          if (id.includes("recharts")) return "recharts";
+          if (id.includes("@tanstack/react-query")) return "tanstack-query";
+          if (id.includes("@trpc")) return "trpc";
+          if (id.includes("lucide-react")) return "lucide";
+        },
+      },
+    },
   },
   server: {
     host: true,

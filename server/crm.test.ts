@@ -56,8 +56,9 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("calls.log");
   });
 
-  it("should have sos router with create", () => {
+  it("should have sos router with create and openList", () => {
     expect(appRouter._def.procedures).toHaveProperty("sos.create");
+    expect(appRouter._def.procedures).toHaveProperty("sos.openList");
   });
 
   it("should have distribution router with getNext and repescagem", () => {

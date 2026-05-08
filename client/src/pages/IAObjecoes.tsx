@@ -1,4 +1,3 @@
-import DashboardLayout from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,7 +33,6 @@ export default function IAObjecoes() {
   };
 
   return (
-    <DashboardLayout>
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">IA de Objeções</h1>
@@ -127,6 +125,5 @@ export default function IAObjecoes() {
           </TabsContent>
         </Tabs>
       </div>
-    </DashboardLayout>
   );
 }

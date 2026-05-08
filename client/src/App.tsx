@@ -1,45 +1,47 @@
+import ErrorBoundary from "@/components/ErrorBoundary";
 import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import NotFound from "@/pages/NotFound";
+import { ThemeProvider } from "@/contexts/ThemeContext";
+import { lazy, Suspense } from "react";
 import { Route, Switch } from "wouter";
-import ErrorBoundary from "./components/ErrorBoundary";
-import { ThemeProvider } from "./contexts/ThemeContext";
-import Home from "./pages/Home";
-import Contactos from "./pages/Contactos";
-import Pendentes from "./pages/Pendentes";
-import Contratos from "./pages/Contratos";
-import Calculadora from "./pages/Calculadora";
-import IAObjecoes from "./pages/IAObjecoes";
-import Campanhas from "./pages/Campanhas";
-import Ranking from "./pages/Ranking";
-import Calendario from "./pages/Calendario";
-import Relatorios from "./pages/Relatorios";
-import Equipa from "./pages/Equipa";
-import Auditoria from "./pages/Auditoria";
-import BaseDados from "./pages/BaseDados";
-import Login from "./pages/Login";
-import GestaoUtilizadores from "./pages/GestaoUtilizadores";
+
+const Login = lazy(() => import("@/pages/Login"));
+const AuthenticatedApp = lazy(() => import("@/AuthenticatedApp"));
+
+function LoginBootstrapFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" />
+        <span>A abrir início de sessão…</span>
+      </div>
+    </div>
+  );
+}
+
+function AppBootstrapFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-3 text-sm text-muted-foreground">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-primary" />
+        <span>A preparar aplicação…</span>
+      </div>
+    </div>
+  );
+}
 
 function Router() {
   return (
     <Switch>
-      <Route path={"/"} component={Home} />
-      <Route path={"/contactos"} component={Contactos} />
-      <Route path={"/pendentes"} component={Pendentes} />
-      <Route path={"/contratos"} component={Contratos} />
-      <Route path={"/calculadora"} component={Calculadora} />
-      <Route path={"/ia-objecoes"} component={IAObjecoes} />
-      <Route path={"/campanhas"} component={Campanhas} />
-      <Route path={"/ranking"} component={Ranking} />
-      <Route path={"/calendario"} component={Calendario} />
-      <Route path={"/relatorios"} component={Relatorios} />
-      <Route path={"/equipa"} component={Equipa} />
-      <Route path={"/auditoria"} component={Auditoria} />
-      <Route path={"/base-dados"} component={BaseDados} />
-      <Route path={"/login"} component={Login} />
-      <Route path={"/utilizadores"} component={GestaoUtilizadores} />
-      <Route path={"/404"} component={NotFound} />
-      <Route component={NotFound} />
+      <Route path="/login">
+        <Suspense fallback={<LoginBootstrapFallback />}>
+          <Login />
+        </Suspense>
+      </Route>
+      <Route>
+        <Suspense fallback={<AppBootstrapFallback />}>
+          <AuthenticatedApp />
+        </Suspense>
+      </Route>
     </Switch>
   );
 }
@@ -48,10 +50,8 @@ function App() {
   return (
     <ErrorBoundary>
       <ThemeProvider defaultTheme="light">
-        <TooltipProvider>
-          <Toaster />
-          <Router />
-        </TooltipProvider>
+        <Toaster />
+        <Router />
       </ThemeProvider>
     </ErrorBoundary>
   );
