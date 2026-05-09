@@ -151,10 +151,11 @@ export default function SuperAdmin() {
             </CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
               Em cada <code className="text-xs">pnpm run deploy:pm2</code> regista-se uma linha (versão, ref. do
-              deploy, sumário). Entradas com mais de <strong>{RELEASE_LOG_RETENTION_DAYS} dias</strong> são
-              removidas do ficheiro no servidor ao gravar novo deploy e deixam de aparecer aqui.{" "}
-              <code className="text-xs">release-log-bootstrap.json</code> fornece o histórico inicial até ao
-              primeiro deploy.
+              deploy, sumário). No servidor, entradas automáticas com mais de{" "}
+              <strong>{RELEASE_LOG_RETENTION_DAYS} dias</strong> são removidas do ficheiro ao gravar um novo deploy. A
+              lista abaixo <strong>soma</strong> esse ficheiro (<code className="text-xs">data/release-log.json</code>)
+              com os blocos de <code className="text-xs">release-log-bootstrap.json</code> no projecto — assim o
+              histórico curado (ex. dias anteriores) mantém-se visível mesmo depois de já existir log de deploy.
             </p>
           </CardHeader>
           <CardContent>
@@ -190,7 +191,13 @@ export default function SuperAdmin() {
                           </span>
                         ) : null}
                       </div>
-                      <ReleaseLogRetentionCountdown atIso={entry.at} />
+                      {entry.automated ? (
+                        <ReleaseLogRetentionCountdown atIso={entry.at} />
+                      ) : (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Bloco do histórico versionado — não é removido pelo prazo de retenção dos deploys.
+                        </p>
+                      )}
 
                       {entry.title ? (
                         <h3 className="font-semibold text-foreground mb-2">{entry.title}</h3>
