@@ -5,19 +5,33 @@ import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 import { useState, useEffect, useMemo, useRef } from "react";
 
-function sessionDurationLabel(startedAt: Date | null | undefined, fallbackLastOnline: Date | null | undefined): { hours: number; mins: number } {
-  const t = startedAt
-    ? new Date(startedAt).getTime()
-    : fallbackLastOnline
-      ? new Date(fallbackLastOnline).getTime()
+type SessionRow = {
+  presenceSessionStartedAt?: Date | string | null;
+  lastOnlineAt?: Date | string | null;
+  pauseStartedAt?: Date | string | null;
+  totalPauseMinutes?: number | null;
+};
+
+/** Minutos úteis de sessão: tempo desde o início menos pausas já fechadas e a pausa actual. */
+function effectiveActiveMinutes(row: SessionRow | undefined): { hours: number; mins: number } {
+  const startedAt = row?.presenceSessionStartedAt
+    ? new Date(row.presenceSessionStartedAt).getTime()
+    : row?.lastOnlineAt
+      ? new Date(row.lastOnlineAt).getTime()
       : Date.now();
-  const totalMin = Math.max(0, Math.floor((Date.now() - t) / 60000));
-  return { hours: Math.floor(totalMin / 60), mins: totalMin % 60 };
+  const wallMin = Math.max(0, Math.floor((Date.now() - startedAt) / 60000));
+  const closedPauseMin = Number(row?.totalPauseMinutes ?? 0) || 0;
+  const pauseStartedAt = row?.pauseStartedAt ? new Date(row.pauseStartedAt).getTime() : null;
+  const currentPauseMin = pauseStartedAt
+    ? Math.floor((Date.now() - pauseStartedAt) / 60000)
+    : 0;
+  const activeMin = Math.max(0, wallMin - closedPauseMin - currentPauseMin);
+  return { hours: Math.floor(activeMin / 60), mins: activeMin % 60 };
 }
 
 /**
- * Barra de sessão global: o tempo de sessão vem do servidor (`presenceSessionStartedAt`) e
- * mantém-se ao mudar de página (não depende só do Dashboard).
+ * Barra de sessão global: tempo útil (sem contar pausas), sessão iniciada ao entrar (servidor),
+ * pausa manual e retoma ao voltar a interagir com a app.
  */
 export function SessionBar() {
   const sessionQuery = trpc.session.getStatus.useQuery(undefined, { refetchInterval: 15000 });
@@ -27,6 +41,8 @@ export function SessionBar() {
   const [tick, setTick] = useState(0);
   const isPaused = !!sessionQuery.data?.pauseStartedAt;
   const pauseAutoEndedRef = useRef(false);
+  const isPausedRef = useRef(isPaused);
+  isPausedRef.current = isPaused;
 
   useEffect(() => {
     const id = window.setInterval(() => setTick((n) => n + 1), 1000);
@@ -35,10 +51,7 @@ export function SessionBar() {
 
   const { hours, mins } = useMemo(() => {
     void tick;
-    const row = sessionQuery.data as
-      | { presenceSessionStartedAt?: Date | null; lastOnlineAt?: Date | null }
-      | undefined;
-    return sessionDurationLabel(row?.presenceSessionStartedAt ?? null, row?.lastOnlineAt ?? null);
+    return effectiveActiveMinutes(sessionQuery.data as SessionRow | undefined);
   }, [sessionQuery.data, tick]);
 
   const pauseElapsed =
@@ -57,6 +70,32 @@ export function SessionBar() {
     toast.info("Pausa terminada automaticamente (limite 1h)");
   }, [isPaused, pauseElapsed, sessionQuery.data?.pauseStartedAt, endPause]);
 
+  /** Qualquer interacção na página retoma a pausa (debounced por um disparo por período em pausa). */
+  useEffect(() => {
+    if (!isPaused) return;
+    let fired = false;
+    const resume = (e: Event) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.closest?.("[data-session-bar-actions]")) return;
+      if (fired || !isPausedRef.current) return;
+      fired = true;
+      endPause.mutate(undefined, {
+        onSuccess: () => {
+          toast.info("Sessão retomada após actividade");
+        },
+      });
+    };
+    const opts: AddEventListenerOptions = { capture: true, passive: true };
+    window.addEventListener("pointerdown", resume, opts);
+    window.addEventListener("keydown", resume, opts);
+    window.addEventListener("scroll", resume, opts);
+    return () => {
+      window.removeEventListener("pointerdown", resume, opts);
+      window.removeEventListener("keydown", resume, opts);
+      window.removeEventListener("scroll", resume, opts);
+    };
+  }, [isPaused, endPause]);
+
   return (
     <Card className="border-0 shadow-sm shrink-0">
       <CardContent className="py-3">
@@ -68,13 +107,14 @@ export function SessionBar() {
             </div>
             <span className="text-muted-foreground hidden sm:inline">|</span>
             <span className="text-muted-foreground">
-              Tempo de sessão: {hours}h {mins}min
+              Tempo útil: {hours}h {mins}min
+              <span className="hidden md:inline text-xs ml-1 opacity-80">(pausas não contam)</span>
             </span>
             {isPaused && (
               <span className="text-orange-500 font-medium">Pausa: {pauseElapsed}min / 60min</span>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2" data-session-bar-actions>
             {isPaused ? (
               <Button variant="ghost" size="sm" className="text-xs gap-1" onClick={() => endPause.mutate()}>
                 <Play className="h-3 w-3" /> Voltar

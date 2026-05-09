@@ -19,12 +19,14 @@ export default function Pendentes() {
     notes: "",
     offerDesired: "",
     status: "agendado" as string,
+    priorityLevel: "3",
   });
   const [newPendente, setNewPendente] = useState({
     contactId: "",
     returnDate: "",
     notes: "",
     offerDesired: "",
+    priorityLevel: "3",
   });
 
   const pendentesQuery = trpc.pendentes.list.useQuery();
@@ -32,7 +34,7 @@ export default function Pendentes() {
     onSuccess: () => {
       toast.success("Pendente agendado com sucesso!");
       setShowCreateDialog(false);
-      setNewPendente({ contactId: "", returnDate: "", notes: "", offerDesired: "" });
+      setNewPendente({ contactId: "", returnDate: "", notes: "", offerDesired: "", priorityLevel: "3" });
       pendentesQuery.refetch();
     },
     onError: (err: any) => toast.error(err.message),
@@ -56,6 +58,7 @@ export default function Pendentes() {
       notes: p.notes || "",
       offerDesired: p.offerDesired || "",
       status: p.status || "agendado",
+      priorityLevel: String(p.priorityLevel ?? 3),
     });
   };
 
@@ -69,6 +72,7 @@ export default function Pendentes() {
       returnDate: newPendente.returnDate,
       notes: newPendente.notes || undefined,
       offerDesired: newPendente.offerDesired || undefined,
+      priorityLevel: parseInt(newPendente.priorityLevel, 10),
     });
   };
 
@@ -132,6 +136,24 @@ export default function Pendentes() {
                     onChange={(e) => setNewPendente({ ...newPendente, offerDesired: e.target.value })}
                   />
                 </div>
+                <div className="space-y-2">
+                  <Label>Prioridade (1–5)</Label>
+                  <Select
+                    value={newPendente.priorityLevel}
+                    onValueChange={(v) => setNewPendente({ ...newPendente, priorityLevel: v })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="1">1 — mais baixa</SelectItem>
+                      <SelectItem value="2">2</SelectItem>
+                      <SelectItem value="3">3 — normal</SelectItem>
+                      <SelectItem value="4">4</SelectItem>
+                      <SelectItem value="5">5 — mais alta</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <Button
                   className="w-full"
                   onClick={handleCreate}
@@ -175,6 +197,24 @@ export default function Pendentes() {
                     </Select>
                   </div>
                   <div className="space-y-2">
+                    <Label>Prioridade (1–5)</Label>
+                    <Select
+                      value={editForm.priorityLevel}
+                      onValueChange={(v) => setEditForm({ ...editForm, priorityLevel: v })}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">1 — mais baixa</SelectItem>
+                        <SelectItem value="2">2</SelectItem>
+                        <SelectItem value="3">3 — normal</SelectItem>
+                        <SelectItem value="4">4</SelectItem>
+                        <SelectItem value="5">5 — mais alta</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
                     <Label>Notas</Label>
                     <Textarea
                       value={editForm.notes}
@@ -198,6 +238,7 @@ export default function Pendentes() {
                         notes: editForm.notes || null,
                         offerDesired: editForm.offerDesired || null,
                         status: editForm.status as any,
+                        priorityLevel: parseInt(editForm.priorityLevel, 10),
                       })
                     }
                   >
@@ -242,6 +283,9 @@ export default function Pendentes() {
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="text-[10px]">
+                          P{p.priorityLevel ?? 3}
+                        </Badge>
                         <Badge className={statusColors[p.status] || ""}>
                           {p.status}
                         </Badge>

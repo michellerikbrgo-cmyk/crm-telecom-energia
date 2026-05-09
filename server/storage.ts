@@ -2,20 +2,7 @@
 // Uploads via Forge Server presigned URL to S3 (PUT direct).
 // Downloads return /manus-storage/{key} paths served via 307 redirect.
 
-import { ENV } from "./_core/env";
-
-function getForgeConfig() {
-  const forgeUrl = ENV.forgeApiUrl;
-  const forgeKey = ENV.forgeApiKey;
-
-  if (!forgeUrl || !forgeKey) {
-    throw new Error(
-      "Storage config missing: set BUILT_IN_FORGE_API_URL and BUILT_IN_FORGE_API_KEY",
-    );
-  }
-
-  return { forgeUrl: forgeUrl.replace(/\/+$/, ""), forgeKey };
-}
+import { getForgeRuntimeConfig } from "./forgeRuntime";
 
 function normalizeKey(relKey: string): string {
   return relKey.replace(/^\/+/, "");
@@ -33,7 +20,13 @@ export async function storagePut(
   data: Buffer | Uint8Array | string,
   contentType = "application/octet-stream",
 ): Promise<{ key: string; url: string }> {
-  const { forgeUrl, forgeKey } = getForgeConfig();
+  const cfg = await getForgeRuntimeConfig();
+  if (!cfg) {
+    throw new Error(
+      "Storage config missing: defina BUILT_IN_FORGE_API_URL e BUILT_IN_FORGE_API_KEY no servidor ou Forge API na página Super Admin.",
+    );
+  }
+  const { forgeUrl, forgeKey } = cfg;
   const key = appendHashSuffix(normalizeKey(relKey));
 
   // 1. Get presigned PUT URL from Forge
@@ -77,7 +70,13 @@ export async function storageGet(relKey: string): Promise<{ key: string; url: st
 }
 
 export async function storageGetSignedUrl(relKey: string): Promise<string> {
-  const { forgeUrl, forgeKey } = getForgeConfig();
+  const cfg = await getForgeRuntimeConfig();
+  if (!cfg) {
+    throw new Error(
+      "Storage config missing: defina Forge na variável de ambiente ou em Super Admin.",
+    );
+  }
+  const { forgeUrl, forgeKey } = cfg;
   const key = normalizeKey(relKey);
 
   const getUrl = new URL("v1/storage/presign/get", forgeUrl + "/");

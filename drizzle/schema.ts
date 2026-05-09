@@ -1,4 +1,4 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, varchar, boolean, bigint, uniqueIndex } from "drizzle-orm/mysql-core";
+import { int, mysqlEnum, mysqlTable, text, timestamp, tinyint, varchar, boolean, bigint, uniqueIndex } from "drizzle-orm/mysql-core";
 
 // ============ USERS ============
 export const users = mysqlTable("users", {
@@ -28,6 +28,8 @@ export const users = mysqlTable("users", {
   lastSeenIp: varchar("lastSeenIp", { length: 45 }),
   lastSeenUserAgent: varchar("lastSeenUserAgent", { length: 512 }),
   lastSeenGeo: varchar("lastSeenGeo", { length: 255 }),
+  /** URL servida via `/manus-storage/...` após upload (Forge/S3). */
+  avatarUrl: varchar("avatarUrl", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -52,6 +54,9 @@ export const appSettings = mysqlTable("appSettings", {
   whatsappPhoneNumberId: varchar("whatsappPhoneNumberId", { length: 64 }),
   whatsappBusinessAccountId: varchar("whatsappBusinessAccountId", { length: 64 }),
   whatsappVerifyTokenEnc: text("whatsappVerifyTokenEnc"),
+  /** Base URL Forge/Manus (ex.: https://forge.manus.im). Se vazio com chave, usa host por defeito. */
+  forgeApiUrl: varchar("forgeApiUrl", { length: 512 }),
+  forgeApiKeyEnc: text("forgeApiKeyEnc"),
   // audit
   updatedBy: int("updatedBy"),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -113,6 +118,8 @@ export const pendentes = mysqlTable("pendentes", {
   offerDesired: text("offerDesired"),
   status: mysqlEnum("status", ["agendado", "realizado", "expirado", "cancelado"]).default("agendado").notNull(),
   notified: boolean("notified").default(false).notNull(),
+  /** 1 = mais fraco … 5 = mais forte (prioridade nos alertas). */
+  priorityLevel: tinyint("priorityLevel", { unsigned: true }).default(3).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

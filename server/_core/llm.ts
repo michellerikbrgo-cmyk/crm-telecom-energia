@@ -1,4 +1,4 @@
-import { ENV } from "./env";
+import { getForgeRuntimeConfig } from "../forgeRuntime";
 
 export type Role = "system" | "user" | "assistant" | "tool" | "function";
 
@@ -209,16 +209,6 @@ const normalizeToolChoice = (
   return toolChoice;
 };
 
-const resolveApiUrl = () =>
-  ENV.forgeApiUrl && ENV.forgeApiUrl.trim().length > 0
-    ? `${ENV.forgeApiUrl.replace(/\/$/, "")}/v1/chat/completions`
-    : "https://forge.manus.im/v1/chat/completions";
-
-const assertApiKey = () => {
-  if (!ENV.forgeApiKey) {
-    throw new Error("OPENAI_API_KEY is not configured");
-  }
-};
 
 const normalizeResponseFormat = ({
   responseFormat,
@@ -266,7 +256,13 @@ const normalizeResponseFormat = ({
 };
 
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
-  assertApiKey();
+  const cfg = await getForgeRuntimeConfig();
+  if (!cfg?.forgeKey) {
+    throw new Error(
+      "Forge API não configurada: defina BUILT_IN_FORGE_API_* no servidor ou na página Super Admin.",
+    );
+  }
+  const apiUrl = `${cfg.forgeUrl.replace(/\/$/, "")}/v1/chat/completions`;
 
   const {
     messages,
@@ -312,11 +308,11 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     payload.response_format = normalizedResponseFormat;
   }
 
-  const response = await fetch(resolveApiUrl(), {
+  const response = await fetch(apiUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${ENV.forgeApiKey}`,
+      authorization: `Bearer ${cfg.forgeKey}`,
     },
     body: JSON.stringify(payload),
   });
