@@ -9,7 +9,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, Hourglass, ScrollText } from "lucide-react";
+import { AlertTriangle, BookOpen, Hourglass, ScrollText } from "lucide-react";
+import atualizacoesMd from "@shared/ATUALIZACOES.md?raw";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 
@@ -38,6 +39,40 @@ function formatCountdownPt(ms: number) {
   if (h > 0) return `${h}h ${m}min ${s}s`;
   if (m > 0) return `${m}min ${s}s`;
   return `${s}s`;
+}
+
+/** Renderização simples do guia em Markdown (títulos ## e texto). */
+function AtualizacoesDocBody({ source }: { source: string }) {
+  let s = source.replace(/^\uFEFF/, "").trim();
+  let pageTitle: string | undefined;
+  if (s.startsWith("# ")) {
+    const nl = s.indexOf("\n");
+    pageTitle = nl === -1 ? s.slice(2).trim() : s.slice(2, nl).trim();
+    s = nl === -1 ? "" : s.slice(nl + 1).trim();
+  }
+  const parts = s.split(/\n## /);
+  const intro = parts[0]?.trim().replace(/^---\s*$/gm, "").trim() || "";
+  const sections = parts.slice(1).map((block) => {
+    const nl = block.indexOf("\n");
+    const title = nl === -1 ? block.trim() : block.slice(0, nl).trim();
+    const body = nl === -1 ? "" : block.slice(nl + 1).trim();
+    return { title, body };
+  });
+
+  return (
+    <div className="space-y-6">
+      {pageTitle ? <h2 className="text-lg font-semibold tracking-tight text-foreground">{pageTitle}</h2> : null}
+      {intro ? (
+        <p className="text-muted-foreground whitespace-pre-wrap leading-relaxed text-sm">{intro}</p>
+      ) : null}
+      {sections.map((sec, i) => (
+        <div key={i} className="space-y-2">
+          <h3 className="text-base font-semibold text-foreground border-b border-border/70 pb-1.5">{sec.title}</h3>
+          <div className="text-muted-foreground whitespace-pre-wrap leading-relaxed text-sm">{sec.body}</div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function ReleaseLogRetentionCountdown({ atIso }: { atIso: string }) {
@@ -224,6 +259,24 @@ export default function SuperAdmin() {
                   ) : null}
                 </div>
               )}
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <Card className="shadow-sm border border-border border-l-[4px] border-l-muted-foreground/40">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <BookOpen className="h-5 w-5 text-muted-foreground" aria-hidden />
+              Guia de actualizações (documentação)
+            </CardTitle>
+            <p className="text-sm text-muted-foreground font-normal">
+              Texto versionado em <code className="text-xs">shared/ATUALIZACOES.md</code>. Edite esse ficheiro no
+              repositório para actualizar este painel após o próximo deploy.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <ScrollArea className="h-[min(480px,60vh)] pr-4">
+              <AtualizacoesDocBody source={atualizacoesMd} />
             </ScrollArea>
           </CardContent>
         </Card>

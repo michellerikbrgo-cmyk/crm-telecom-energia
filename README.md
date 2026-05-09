@@ -78,6 +78,8 @@ Não commits o `.env`; mantém credenciais só no servidor ou gestor de segredos
 | `pnpm exec drizzle-kit migrate` | Aplica migrações SQL em `drizzle/` (requer `DATABASE_URL`) |
 | `pnpm run deploy:pm2` | Build + **registo no log de actualização** (`data/release-log.json`) + `pm2 restart crm`. Opcional: `DEPLOY_NOTES="texto"` ou `DEPLOY_REF` / `GITHUB_SHA`. |
 
+Guia legível de melhorias (editar no Git e fazer deploy para aparecer na Super Admin): **`shared/ATUALIZACOES.md`**.
+
 Para gerar novas migrações a partir do schema (equipa de desenvolvimento):
 
 ```bash
