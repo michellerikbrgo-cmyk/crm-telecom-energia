@@ -1,8 +1,12 @@
 import { z } from "zod";
+import { buildHealthPayload } from "./appVersion";
 import { notifyOwner } from "./notification";
 import { adminProcedure, publicProcedure, router } from "./trpc";
 
 export const systemRouter = router({
+  /** Sem input — útil para confirmar deploy / versão da API. */
+  ping: publicProcedure.query(() => buildHealthPayload()),
+
   health: publicProcedure
     .input(
       z.object({

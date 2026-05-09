@@ -42,6 +42,8 @@ queryClient.getMutationCache().subscribe(event => {
   if (event.type === "updated" && event.action.type === "error") {
     const error = event.mutation.state.error;
     redirectToLoginIfUnauthorized(error);
+    const msg = error instanceof Error ? error.message : "";
+    if (msg.includes("No procedure found")) return;
     console.error("[API Mutation Error]", error);
   }
 });

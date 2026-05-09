@@ -9,9 +9,22 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { trpc } from "@/lib/trpc";
+import { TRPCClientError } from "@trpc/client";
 import { Camera, Trash2 } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { toast } from "sonner";
+
+function formatAvatarApiError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (
+    msg.includes("No procedure found") ||
+    msg.includes("NOT_FOUND") ||
+    (e instanceof TRPCClientError && (e.data?.code === "NOT_FOUND" || e.data?.httpStatus === 404))
+  ) {
+    return "O servidor não tem ainda o endpoint de avatar. Peça ao administrador para fazer deploy da versão mais recente da API e reiniciar o Node.";
+  }
+  return msg || "Erro ao processar o pedido";
+}
 
 type Props = {
   open: boolean;
@@ -38,7 +51,7 @@ export function UserProfileDialog({
       onAvatarUpdated();
       onOpenChange(false);
     },
-    onError: (e) => toast.error(e.message || "Erro ao enviar imagem"),
+    onError: (e) => toast.error(formatAvatarApiError(e)),
   });
 
   const removeMutation = trpc.auth.removeAvatar.useMutation({
@@ -48,7 +61,7 @@ export function UserProfileDialog({
       onAvatarUpdated();
       onOpenChange(false);
     },
-    onError: (e) => toast.error(e.message || "Erro ao remover"),
+    onError: (e) => toast.error(formatAvatarApiError(e)),
   });
 
   const handleFile = useCallback(
@@ -84,7 +97,8 @@ export function UserProfileDialog({
         <DialogHeader>
           <DialogTitle>Foto de perfil</DialogTitle>
           <DialogDescription>
-            JPG, PNG ou WebP até 2&nbsp;MB. Requer armazenamento configurado no servidor (Forge/S3).
+            JPG, PNG ou WebP até 2&nbsp;MB. É necessário <code className="text-xs">LOCAL_UPLOAD_ROOT</code> no
+            servidor (ver README).
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col items-center gap-4 py-2">

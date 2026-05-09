@@ -27,8 +27,10 @@ import {
 } from "../drizzle/schema";
 import { eq, desc, asc, and, sql, like, or, inArray, type SQL } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
+import { detectImageMimeFromBuffer } from "./_core/imageMagic";
 import {
   contactBelongsToUserTenant,
+  getScopedTenantCoordinatorUserId,
   getUserIdsInTenant,
   isSuperAdminUser,
   whereContactsForUser,
@@ -36,9 +38,7 @@ import {
   whereUsersForUser,
   whereInTenantUserIds,
 } from "./tenantScope";
-import OpenAI from "openai";
 import { storagePut } from "./storage";
-import { invalidateForgeRuntimeCache } from "./forgeRuntime";
 import { decryptText, encryptText, maskSecret } from "./_core/cryptoSecrets";
 import {
   getClientIp,
@@ -46,6 +46,7 @@ import {
   lookupGeoLabel,
   summarizeUserAgent,
 } from "./_core/clientMeta";
+import { readReleaseLogMerged } from "./releaseLogStore";
 
 function canManageCampaigns(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
@@ -122,6 +123,56 @@ async function loadCampaignOrThrow(db: NonNullable<Awaited<ReturnType<typeof get
   return row[0];
 }
 
+function extractAssistantText(raw: unknown): string {
+  if (typeof raw === "string") return raw;
+  if (!Array.isArray(raw)) return "";
+  return raw
+    .map((part: any) => {
+      if (typeof part === "string") return part;
+      if (part?.type === "text" && typeof part.text === "string") return part.text;
+      return "";
+    })
+    .join("");
+}
+
+async function completeSalesChat(
+  systemPrompt: string,
+  conversation: Array<{ role: "user" | "assistant"; content: string }>,
+): Promise<string> {
+  const messages = [
+    { role: "system" as const, content: systemPrompt },
+    ...conversation.map((m) => ({ role: m.role, content: m.content })),
+  ];
+
+  try {
+    const response = await invokeLLM({ messages });
+    const raw = response.choices?.[0]?.message?.content;
+    const text = extractAssistantText(raw);
+    if (text.trim()) return text.trim();
+  } catch {
+    /* invokeLLM usa OpenAI */
+  }
+
+  return "";
+}
+
+function roleplayTopicHint(topic: "telecom" | "energia" | "ambos"): string {
+  switch (topic) {
+    case "telecom":
+      return "\nCenário actual: fibra, móvel, TV e pacotes de telecomunicações (contexto Vodafone).";
+    case "energia":
+      return "\nCenário actual: electricidade, gás ou combustível (contexto Repsol).";
+    default:
+      return "\nCenário: pode alternar entre telecom e energia.";
+  }
+}
+
+const ROLEPLAY_SYSTEM_PREFIX =
+  "Você está num roleplay de treino de vendas em Portugal. É o CLIENTE (particular ou pequena empresa). " +
+  "Fala português de Portugal, tom natural de telefonema. Nunca revele que é uma IA. " +
+  "Não escreva meta-comentários (ex.: «Como cliente digo…»). Responda só com a fala do cliente: uma ou duas frases curtas. " +
+  "Pode objectar ao preço, fidelização, comparar com MEO/NOS, ou hesitar. Se o vendedor for convincente, pode ceder um pouco.";
+
 export const appRouter = router({
   system: systemRouter,
   auth: router({
@@ -168,6 +219,11 @@ export const appRouter = router({
         const buffer = Buffer.from(input.base64, "base64");
         if (buffer.byteLength > 2 * 1024 * 1024) {
           throw new Error("Imagem demasiado grande (máx. 2MB)");
+        }
+
+        const detected = detectImageMimeFromBuffer(buffer);
+        if (!detected || detected !== input.mimeType) {
+          throw new Error("Imagem inválida ou tipo não corresponde ao ficheiro (use JPG, PNG ou WebP).");
         }
 
         const db = await getDb();
@@ -878,54 +934,85 @@ Regras:
 - Mencione benefícios como: poupança, qualidade de serviço, fidelização sem compromisso, apoio técnico dedicado
 - Produtos: Vodafone (fibra, móvel, TV) e Repsol (eletricidade, gás, combustível com desconto)`;
 
-        try {
-          // Try Manus LLM first
-          const response = await invokeLLM({
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: `O cliente disse: "${input.objection}"\n\nComo devo responder para ultrapassar esta objeção?` },
-            ],
-          });
-          const content = response.choices?.[0]?.message?.content || "";
-          if (content) return { response: content };
-        } catch (e) {
-          // Fallback to OpenAI
+        const text = await completeSalesChat(systemPrompt, [
+          {
+            role: "user",
+            content: `O cliente disse: "${input.objection}"\n\nComo devo responder para ultrapassar esta objeção?`,
+          },
+        ]);
+        if (text) return { response: text };
+        return {
+          response:
+            "IA indisponível. Configure OpenAI na página Super Admin ou OPENAI_API_KEY no servidor.",
+        };
+      }),
+
+    /** Simulador: IA interpreta o cliente; o utilizador é o vendedor. */
+    roleplayTurn: protectedProcedure
+      .input(
+        z.object({
+          stage: z.enum(["start", "continue"]),
+          topic: z.enum(["telecom", "energia", "ambos"]).optional(),
+          transcript: z
+            .array(
+              z.object({
+                role: z.enum(["customer", "seller"]),
+                content: z.string().max(4000),
+              }),
+            )
+            .max(40)
+            .optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const topic = input.topic ?? "ambos";
+        const systemPrompt = ROLEPLAY_SYSTEM_PREFIX + roleplayTopicHint(topic);
+
+        const fallbackMsg =
+          "IA indisponível. Configure OpenAI na página Super Admin ou OPENAI_API_KEY no servidor.";
+
+        if (input.stage === "start") {
+          const conversation: Array<{ role: "user" | "assistant"; content: string }> = [
+            {
+              role: "user",
+              content:
+                "Inicia a simulação. Responde APENAS com a primeira fala do cliente ao telefone (objeção, dúvida ou recusa suave). Sem prefixos tipo «Cliente:» nem aspas.",
+            },
+          ];
+          const text = await completeSalesChat(systemPrompt, conversation);
+          return { customerMessage: text.trim() || fallbackMsg };
         }
 
-        let dbOpenaiKey = "";
-        try {
-          const adb = await getDb();
-          if (adb) {
-            const sk = await adb.select().from(appSettings).limit(1);
-            const enc = sk[0]?.openaiApiKeyEnc;
-            if (enc) dbOpenaiKey = decryptText(enc);
+        const t = input.transcript ?? [];
+        if (t.length === 0) {
+          throw new Error("Envie o histórico da conversa para continuar.");
+        }
+        if (t[t.length - 1]?.role !== "seller") {
+          throw new Error("A última mensagem deve ser sua (vendedor).");
+        }
+
+        const conversation: Array<{ role: "user" | "assistant"; content: string }> = [];
+        for (const m of t) {
+          if (m.role === "seller") {
+            conversation.push({ role: "user", content: m.content });
+          } else {
+            conversation.push({ role: "assistant", content: m.content });
           }
-        } catch {
-          /* ignore */
         }
 
-        const openaiKey = process.env.OPENAI_API_KEY?.trim() || dbOpenaiKey.trim();
-        if (!openaiKey) {
-          return {
-            response:
-              "IA indisponível. Configure OpenAI na página Super Admin ou OPENAI_API_KEY no servidor.",
-          };
-        }
-        const openai = new OpenAI({ apiKey: openaiKey });
-        const completion = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: `O cliente disse: "${input.objection}"\n\nComo devo responder para ultrapassar esta objeção?` },
-          ],
-        });
-        const content = completion.choices?.[0]?.message?.content || "Não foi possível gerar uma resposta.";
-        return { response: content };
+        const text = await completeSalesChat(systemPrompt, conversation);
+        return { customerMessage: text.trim() || fallbackMsg };
       }),
   }),
 
   // ============ SUPER ADMIN SETTINGS ============
   admin: router({
+    /** Log de actualização (bootstrap + entrada automática por deploy). */
+    getReleaseLog: superAdminProcedure.query(async () => {
+      const entries = await readReleaseLogMerged();
+      return { entries };
+    }),
+
     getSettings: superAdminProcedure.query(async () => {
       const db = await getDb();
       if (!db) throw new Error("Database not available");
@@ -945,8 +1032,6 @@ Regras:
           whatsappBusinessAccountId: "",
           whatsappAccessToken: "",
           whatsappVerifyToken: "",
-          forgeApiUrl: "",
-          forgeApiKey: "",
         };
       }
 
@@ -962,8 +1047,6 @@ Regras:
         whatsappBusinessAccountId: s.whatsappBusinessAccountId || "",
         whatsappAccessToken: maskSecret(decryptText(s.whatsappAccessTokenEnc)),
         whatsappVerifyToken: maskSecret(decryptText(s.whatsappVerifyTokenEnc)),
-        forgeApiUrl: (s as { forgeApiUrl?: string | null }).forgeApiUrl || "",
-        forgeApiKey: maskSecret(decryptText((s as { forgeApiKeyEnc?: string | null }).forgeApiKeyEnc)),
       };
     }),
 
@@ -980,8 +1063,6 @@ Regras:
         whatsappPhoneNumberId: z.string().optional(),
         whatsappBusinessAccountId: z.string().optional(),
         whatsappVerifyToken: z.string().optional(),
-        forgeApiUrl: z.string().optional(),
-        forgeApiKey: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -1014,12 +1095,6 @@ Regras:
         setSecret("whatsappAccessTokenEnc", input.whatsappAccessToken);
         setSecret("whatsappVerifyTokenEnc", input.whatsappVerifyToken);
 
-        if (input.forgeApiUrl !== undefined) {
-          const t = input.forgeApiUrl.trim();
-          update.forgeApiUrl = t || null;
-        }
-        setSecret("forgeApiKeyEnc", input.forgeApiKey);
-
         if (existing[0]) {
           await db.update(appSettings).set(update).where(eq(appSettings.id, existing[0].id));
         } else {
@@ -1035,13 +1110,9 @@ Regras:
             whatsappPhoneNumberId: update.whatsappPhoneNumberId ?? null,
             whatsappBusinessAccountId: update.whatsappBusinessAccountId ?? null,
             whatsappVerifyTokenEnc: update.whatsappVerifyTokenEnc ?? null,
-            forgeApiUrl: update.forgeApiUrl ?? null,
-            forgeApiKeyEnc: update.forgeApiKeyEnc ?? null,
             updatedBy: user?.id,
           } as any);
         }
-
-        invalidateForgeRuntimeCache();
 
         await db.insert(auditLogs).values({
           userId: user?.id,
@@ -1665,6 +1736,49 @@ Regras:
 
   // ============ BLACKLIST ============
   blacklist: router({
+    list: protectedProcedure
+      .input(z.object({ search: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+
+        const user = ctx.user as any;
+        const parts: SQL[] = [];
+
+        if (!isSuperAdminUser(user)) {
+          const scope = getScopedTenantCoordinatorUserId(user);
+          if (scope === null || scope === undefined) return [];
+          if (typeof scope === "number") {
+            parts.push(eq(blacklist.tenantId, scope));
+          }
+        }
+
+        const term = input?.search?.trim();
+        if (term) {
+          const cleaned = term.replace(/[%_\\\\]/g, "");
+          if (cleaned.length > 0) {
+            parts.push(like(blacklist.phone, `%${cleaned}%`));
+          }
+        }
+
+        let q = db
+          .select({
+            id: blacklist.id,
+            phone: blacklist.phone,
+            reason: blacklist.reason,
+            createdAt: blacklist.createdAt,
+            addedByName: users.name,
+          })
+          .from(blacklist)
+          .leftJoin(users, eq(blacklist.addedBy, users.id));
+
+        if (parts.length > 0) {
+          q = (q as any).where(and(...parts));
+        }
+
+        return await (q as any).orderBy(desc(blacklist.createdAt)).limit(500);
+      }),
+
     add: protectedProcedure
       .input(z.object({ phone: z.string(), reason: z.string().optional() }))
       .mutation(async ({ ctx, input }) => {

@@ -9,7 +9,7 @@ function createMockContext(crmRole: string = "vendedor"): TrpcContext {
       openId: "test-user",
       email: "test@example.com",
       name: "Test User",
-      loginMethod: "manus",
+      loginMethod: "email",
       role: "user",
       crmRole,
       createdAt: new Date(),
@@ -48,8 +48,9 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("campaigns.create");
   });
 
-  it("should have ai router with askObjection", () => {
+  it("should have ai router with askObjection and roleplayTurn", () => {
     expect(appRouter._def.procedures).toHaveProperty("ai.askObjection");
+    expect(appRouter._def.procedures).toHaveProperty("ai.roleplayTurn");
   });
 
   it("should have calls router with log", () => {
@@ -107,5 +108,14 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("auth.logout");
     expect(appRouter._def.procedures).toHaveProperty("auth.uploadAvatar");
     expect(appRouter._def.procedures).toHaveProperty("auth.removeAvatar");
+  });
+
+  it("should expose system.ping and blacklist.list", () => {
+    expect(appRouter._def.procedures).toHaveProperty("system.ping");
+    expect(appRouter._def.procedures).toHaveProperty("blacklist.list");
+  });
+
+  it("should have admin.getReleaseLog for Super Admin changelog", () => {
+    expect(appRouter._def.procedures).toHaveProperty("admin.getReleaseLog");
   });
 });

@@ -74,7 +74,9 @@ export const authLocalRouter = router({
         throw new Error("E-mail ou senha incorretos");
       }
 
-      const token = await sdk.createSessionToken(user.openId, { name: user.name || "" });
+      const token = await sdk.createSessionToken(user.openId, {
+        name: (user.name?.trim() || user.email || "Utilizador").slice(0, 200),
+      });
       const cookieOptions = getSessionCookieOptions(ctx.req);
       ctx.res.cookie(COOKIE_NAME, token, { ...cookieOptions, maxAge: 30 * 24 * 60 * 60 * 1000 });
 

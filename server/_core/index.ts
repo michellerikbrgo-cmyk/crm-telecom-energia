@@ -1,9 +1,10 @@
 import "dotenv/config";
 import express from "express";
+import rateLimit from "express-rate-limit";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
+import { buildHealthPayload } from "./appVersion";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
@@ -36,9 +37,34 @@ async function startServer() {
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
+
+  app.get("/api/health", (_req, res) => {
+    res.json(buildHealthPayload());
+  });
+
+  /** API HTTP mínima (além de tRPC em `/api/trpc`). */
+  app.get("/api/v1/ping", (_req, res) => {
+    res.json({ ...buildHealthPayload(), api: "v1" as const });
+  });
+
   registerStorageProxy(app);
-  registerOAuthRoutes(app);
+
+  const rawLimit = process.env.API_RATE_LIMIT_PER_MIN;
+  const parsedLimit = rawLimit ? parseInt(rawLimit, 10) : 400;
+  const safeLimit = Number.isFinite(parsedLimit)
+    ? Math.min(2000, Math.max(60, parsedLimit))
+    : 400;
+
+  const trpcLimiter = rateLimit({
+    windowMs: 60_000,
+    max: safeLimit,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests" },
+  });
+
   // tRPC API
+  app.use("/api/trpc", trpcLimiter);
   app.use(
     "/api/trpc",
     createExpressMiddleware({

@@ -28,7 +28,7 @@ export const users = mysqlTable("users", {
   lastSeenIp: varchar("lastSeenIp", { length: 45 }),
   lastSeenUserAgent: varchar("lastSeenUserAgent", { length: 512 }),
   lastSeenGeo: varchar("lastSeenGeo", { length: 255 }),
-  /** URL servida via `/manus-storage/...` após upload (Forge/S3). */
+  /** URL servida via `/manus-storage/...` após upload local. */
   avatarUrl: varchar("avatarUrl", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -54,7 +54,7 @@ export const appSettings = mysqlTable("appSettings", {
   whatsappPhoneNumberId: varchar("whatsappPhoneNumberId", { length: 64 }),
   whatsappBusinessAccountId: varchar("whatsappBusinessAccountId", { length: 64 }),
   whatsappVerifyTokenEnc: text("whatsappVerifyTokenEnc"),
-  /** Base URL Forge/Manus (ex.: https://forge.manus.im). Se vazio com chave, usa host por defeito. */
+  /** Legado (não usado pela app). */
   forgeApiUrl: varchar("forgeApiUrl", { length: 512 }),
   forgeApiKeyEnc: text("forgeApiKeyEnc"),
   // audit

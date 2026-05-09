@@ -42,6 +42,11 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Uploads locais (defina LOCAL_UPLOAD_ROOT para esta pasta ou outra)
+data/uploads/
+# Histórico de deploys gerado por scripts/record-deploy.mjs (opcional não versionar)
+data/release-log.json
+
 # Runtime data
 pids
 *.pid

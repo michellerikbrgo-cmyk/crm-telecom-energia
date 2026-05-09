@@ -3,14 +3,6 @@ import { trpc } from "@/lib/trpc";
 import { TRPCClientError } from "@trpc/client";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
-function safeWriteManusRuntimeUser(payload: unknown) {
-  try {
-    localStorage.setItem("manus-runtime-user-info", JSON.stringify(payload));
-  } catch {
-    /* quota / privacy mode */
-  }
-}
-
 type UseAuthOptions = {
   redirectOnUnauthenticated?: boolean;
   redirectPath?: string;
@@ -53,10 +45,6 @@ export function useAuth(options?: UseAuthOptions) {
       await utils.auth.me.invalidate();
     }
   }, [logoutMutation, utils]);
-
-  useEffect(() => {
-    safeWriteManusRuntimeUser(meQuery.data ?? null);
-  }, [meQuery.data]);
 
   const state = useMemo(
     () => ({

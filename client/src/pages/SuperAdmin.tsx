@@ -7,10 +7,24 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { trpc } from "@/lib/trpc";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ScrollText } from "lucide-react";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
+
+function formatReleaseAt(iso: string) {
+  try {
+    return new Date(iso).toLocaleString("pt-PT", {
+      dateStyle: "short",
+      timeStyle: "short",
+    });
+  } catch {
+    return iso;
+  }
+}
 
 export default function SuperAdmin() {
   const settingsQuery = trpc.admin.getSettings.useQuery();
+  const releaseLogQuery = trpc.admin.getReleaseLog.useQuery();
   const updateMutation = trpc.admin.updateSettings.useMutation({
     onSuccess: async () => {
       toast.success("Configurações guardadas");
@@ -36,8 +50,6 @@ export default function SuperAdmin() {
     whatsappPhoneNumberId: "",
     whatsappBusinessAccountId: "",
     whatsappVerifyToken: "",
-    forgeApiUrl: "",
-    forgeApiKey: "",
   });
 
   const [purgeScope, setPurgeScope] = useState<"crm_only" | "all_except_audit">("crm_only");
@@ -53,9 +65,85 @@ export default function SuperAdmin() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Super Admin</h1>
           <p className="text-muted-foreground">
-            Chaves de IA, Forge/armazenamento, WhatsApp e zona de perigo
+            IA, armazenamento local, WhatsApp e zona de perigo
           </p>
         </div>
+
+        <Card className="shadow-sm border border-border border-l-[4px] border-l-primary">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <ScrollText className="h-5 w-5 text-primary" aria-hidden />
+              Log de actualização do sistema
+            </CardTitle>
+            <p className="text-sm text-muted-foreground font-normal">
+              Em cada <code className="text-xs">pnpm run deploy:pm2</code> regista-se automaticamente uma linha
+              (versão, ref. de deploy, sumário do último commit). O ficheiro{" "}
+              <code className="text-xs">release-log-bootstrap.json</code> na raiz do projecto fornece o histórico
+              inicial até ao primeiro deploy no servidor.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <ScrollArea className="h-[min(420px,55vh)] pr-4">
+              {releaseLogQuery.isLoading ? (
+                <p className="text-sm text-muted-foreground">A carregar log…</p>
+              ) : releaseLogQuery.isError ? (
+                <p className="text-sm text-destructive">Não foi possível carregar o log.</p>
+              ) : (
+                <div className="space-y-6 text-sm">
+                  {(releaseLogQuery.data?.entries ?? []).map((entry, idx) => (
+                    <div
+                      key={`${entry.at}-${idx}`}
+                      className="border-b border-border/60 pb-5 last:border-0 last:pb-0"
+                    >
+                      <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <time className="text-xs tabular-nums text-muted-foreground">
+                          {formatReleaseAt(entry.at)}
+                        </time>
+                        {entry.automated ? (
+                          <Badge variant="secondary" className="text-[10px] font-normal uppercase">
+                            Deploy automático
+                          </Badge>
+                        ) : null}
+                        {entry.version ? (
+                          <Badge variant="outline" className="text-[10px] font-normal">
+                            v{entry.version}
+                          </Badge>
+                        ) : null}
+                        {entry.deployRef ? (
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            {entry.deployRef}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      {entry.title ? (
+                        <h3 className="font-semibold text-foreground mb-2">{entry.title}</h3>
+                      ) : null}
+
+                      {entry.bullets?.length ? (
+                        <ul className="list-disc space-y-1.5 pl-5 text-muted-foreground leading-relaxed">
+                          {entry.bullets.map((line) => (
+                            <li key={line}>{line}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+
+                      {entry.summary ? (
+                        <p className="text-muted-foreground leading-relaxed">{entry.summary}</p>
+                      ) : null}
+                    </div>
+                  ))}
+                  {(releaseLogQuery.data?.entries ?? []).length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      Sem entradas. Faça um deploy com <code className="text-xs">pnpm run deploy:pm2</code> ou
+                      confirme que <code className="text-xs">release-log-bootstrap.json</code> existe na raiz.
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </ScrollArea>
+          </CardContent>
+        </Card>
 
         <Card className="border-0 shadow-sm">
           <CardHeader>
@@ -130,49 +218,6 @@ export default function SuperAdmin() {
               onClick={() => updateMutation.mutate(form as any)}
             >
               {updateMutation.isPending ? "A guardar..." : "Guardar IA"}
-            </Button>
-          </CardContent>
-        </Card>
-
-        <Card className="border-0 shadow-sm">
-          <CardHeader>
-            <CardTitle className="text-lg">Forge / Armazenamento (API)</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Usado para uploads (PDFs, fotos de perfil), proxy <code className="text-xs">/manus-storage</code>, IA via
-              Forge e outros serviços Manus. Se definir{" "}
-              <code className="text-xs">BUILT_IN_FORGE_API_URL</code> /{" "}
-              <code className="text-xs">BUILT_IN_FORGE_API_KEY</code> no servidor, esses valores têm prioridade sobre os
-              campos abaixo.
-            </p>
-            <div className="space-y-2">
-              <Label>URL base da API Forge</Label>
-              <Input
-                placeholder="https://forge.manus.im (opcional se usar só o token no host por defeito)"
-                value={form.forgeApiUrl}
-                onChange={(e) => setForm((s) => ({ ...s, forgeApiUrl: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>API Key (Bearer)</Label>
-              <Input
-                placeholder="(deixa vazio para manter o valor actual)"
-                value={form.forgeApiKey}
-                onChange={(e) => setForm((s) => ({ ...s, forgeApiKey: e.target.value }))}
-              />
-            </div>
-            <Button
-              className="w-full"
-              disabled={updateMutation.isPending}
-              onClick={() =>
-                updateMutation.mutate({
-                  forgeApiUrl: form.forgeApiUrl,
-                  forgeApiKey: form.forgeApiKey,
-                } as any)
-              }
-            >
-              {updateMutation.isPending ? "A guardar..." : "Guardar Forge"}
             </Button>
           </CardContent>
         </Card>
