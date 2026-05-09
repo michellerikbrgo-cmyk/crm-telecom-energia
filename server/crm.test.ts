@@ -67,8 +67,9 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("distribution.repescagem");
   });
 
-  it("should have blacklist router with add", () => {
+  it("should have blacklist router with add and remove", () => {
     expect(appRouter._def.procedures).toHaveProperty("blacklist.add");
+    expect(appRouter._def.procedures).toHaveProperty("blacklist.remove");
   });
 
   it("should have gamification router with ranking", () => {
@@ -84,8 +85,9 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("scripts.create");
   });
 
-  it("should have sales router with list and create", () => {
+  it("should have sales router with list, pipeline and create", () => {
     expect(appRouter._def.procedures).toHaveProperty("sales.list");
+    expect(appRouter._def.procedures).toHaveProperty("sales.pipeline");
     expect(appRouter._def.procedures).toHaveProperty("sales.create");
   });
 

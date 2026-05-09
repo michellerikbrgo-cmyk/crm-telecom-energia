@@ -28,8 +28,8 @@ export default function Campanhas() {
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
   const isSuperAdmin = !!(user as any)?.isSuperAdmin;
-  const canManageCampaigns = isSuperAdmin || ["ce", "coordenador"].includes(crmRole);
-  const canManageScripts = canManageCampaigns || crmRole === "cej";
+  const canManageCampaigns = isSuperAdmin || ["ce", "cej", "coordenador"].includes(crmRole);
+  const canManageScripts = canManageCampaigns;
 
   const [showCampaignDialog, setShowCampaignDialog] = useState(false);
   const [showScriptDialog, setShowScriptDialog] = useState(false);

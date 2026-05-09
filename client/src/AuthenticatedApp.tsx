@@ -23,6 +23,7 @@ const SuperAdmin = lazy(() => import("@/pages/SuperAdmin"));
 const Discador = lazy(() => import("@/pages/Discador"));
 const Supervisao = lazy(() => import("@/pages/Supervisao"));
 const ListaNegra = lazy(() => import("@/pages/ListaNegra"));
+const Acompanhamento = lazy(() => import("@/pages/Acompanhamento"));
 
 /** Carregado só nas rotas autenticadas — não entra no chunk do /login */
 export default function AuthenticatedApp() {
@@ -32,6 +33,7 @@ export default function AuthenticatedApp() {
         <Suspense fallback={<PageLoadFallback />}>
           <Switch>
             <Route path="/painel" component={Home} />
+            <Route path="/acompanhamento" component={Acompanhamento} />
             <Route path="/contactos" component={Contactos} />
             <Route path="/pendentes" component={Pendentes} />
             <Route path="/contratos" component={Contratos} />

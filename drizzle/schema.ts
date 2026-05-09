@@ -271,6 +271,8 @@ export const blacklist = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     tenantId: int("tenantId"),
+    /** Equipa do chefe (mesmo teamId que users.teamId); null = linha antiga ou coordenador. */
+    teamId: int("teamId"),
     phone: varchar("phone", { length: 20 }).notNull(),
     reason: text("reason"),
     addedBy: int("addedBy").notNull(),

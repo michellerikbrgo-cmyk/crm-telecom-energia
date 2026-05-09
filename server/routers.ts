@@ -25,7 +25,7 @@ import {
   users,
   teams,
 } from "../drizzle/schema";
-import { eq, desc, asc, and, sql, like, or, inArray, type SQL } from "drizzle-orm";
+import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, type SQL } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
 import { detectImageMimeFromBuffer } from "./_core/imageMagic";
 import {
@@ -94,6 +94,86 @@ async function resolveUserTeamScopeId(
     return tl[0]?.id ?? null;
   }
   return null;
+}
+
+/** Vendedor: só ele. Coordenador: tenant. CE/CEJ: utilizadores com o mesmo teamId que a equipa resolvida. */
+async function getSellerIdsForPipelineScope(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  user: Record<string, unknown> | null | undefined,
+): Promise<number[] | "ALL"> {
+  if (isSuperAdminUser(user)) return "ALL";
+  const u = user as { id?: number; crmRole?: string; tenantId?: number | null } | null;
+  if (!u?.id) return [];
+  if (u.crmRole === "vendedor") return [u.id];
+  if (u.crmRole === "coordenador") return getUserIdsInTenant(db, user);
+  if (u.crmRole === "ce" || u.crmRole === "cej") {
+    const scopeId = await resolveUserTeamScopeId(db, {
+      id: u.id,
+      teamId: (user as { teamId?: number | null }).teamId ?? null,
+      crmRole: u.crmRole,
+    });
+    if (scopeId == null) return [];
+    const rows = await db.select({ id: users.id }).from(users).where(eq(users.teamId, scopeId));
+    const ids = new Set(rows.map((r) => r.id));
+    ids.add(u.id);
+    return Array.from(ids);
+  }
+  return [];
+}
+
+async function blacklistTeamScopeForInsert(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  user: any,
+): Promise<{ tenantId: number | null; teamId: number | null }> {
+  if (isSuperAdminUser(user)) return { tenantId: null, teamId: null };
+  const tid = user?.tenantId as number | null | undefined;
+  if (tid == null || tid === undefined) {
+    throw new Error("Conta sem empresa (coordenador); não é possível usar a lista negra.");
+  }
+  if (user.crmRole === "coordenador") {
+    return { tenantId: tid, teamId: null };
+  }
+  const teamId = await resolveUserTeamScopeId(db, {
+    id: user.id,
+    teamId: user.teamId ?? null,
+    crmRole: user.crmRole,
+  });
+  if (teamId == null) {
+    throw new Error("Associe o utilizador a uma equipa (teamId) para usar a lista negra.");
+  }
+  return { tenantId: tid, teamId };
+}
+
+const INSTALL_CAL_TITLE_PREFIX = "Instalação #";
+
+async function syncSaleInstallationCalendar(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  opts: { saleId: number; contactId: number; vendedorId: number; installationDate: Date | null },
+) {
+  const title = `${INSTALL_CAL_TITLE_PREFIX}${opts.saleId}`;
+  await db.delete(calendarEvents).where(
+    and(
+      eq(calendarEvents.contactId, opts.contactId),
+      eq(calendarEvents.title, title),
+      eq(calendarEvents.type, "instalacao"),
+    ),
+  );
+  if (!opts.installationDate || Number.isNaN(opts.installationDate.getTime())) return;
+
+  const [contact] = await db.select({ tenantId: contacts.tenantId }).from(contacts).where(eq(contacts.id, opts.contactId)).limit(1);
+
+  await db.insert(calendarEvents).values({
+    tenantId: contact?.tenantId ?? null,
+    title,
+    description: `Instalação agendada (venda #${opts.saleId})`,
+    type: "instalacao",
+    startAt: opts.installationDate,
+    endAt: null,
+    allDay: false,
+    contactId: opts.contactId,
+    assignedTo: opts.vendedorId,
+    createdBy: opts.vendedorId,
+  } as any);
 }
 
 async function assertContactAccessible(
@@ -293,6 +373,33 @@ export const appRouter = router({
           conditions.push(eq(contacts.assignedTo, user.id));
         }
 
+        const utid = user?.tenantId as number | undefined;
+        if (user?.crmRole === "ce" && utid != null) {
+          conditions.push(
+            sql`NOT (
+              ${contacts.status} IN ('novo', 'em_contacto')
+              AND ${contacts.addedBy} IS NOT NULL
+              AND ${contacts.addedBy} = ${contacts.assignedTo}
+              AND ${contacts.addedBy} IN (
+                SELECT id FROM users WHERE crmRole IN ('vendedor', 'cej') AND tenantId = ${utid}
+              )
+            )`,
+          );
+        }
+        if (user?.crmRole === "cej" && utid != null) {
+          conditions.push(
+            sql`NOT (
+              ${contacts.status} IN ('novo', 'em_contacto')
+              AND ${contacts.addedBy} IS NOT NULL
+              AND ${contacts.addedBy} = ${contacts.assignedTo}
+              AND ${contacts.addedBy} <> ${user.id}
+              AND ${contacts.addedBy} IN (
+                SELECT id FROM users WHERE crmRole IN ('vendedor', 'cej') AND tenantId = ${utid}
+              )
+            )`,
+          );
+        }
+
         if (conditions.length > 0) {
           query = query.where(and(...conditions)) as any;
         }
@@ -330,6 +437,9 @@ export const appRouter = router({
           throw new Error("Conta sem empresa (tenant). O Super Admin pode importar contactos globais; demais precisam de coordenador.");
         }
 
+        const manualAssign =
+          user?.crmRole === "vendedor" || user?.crmRole === "cej" ? user.id : null;
+
         await db.insert(contacts).values({
           phone: input.phone,
           name: input.name || null,
@@ -337,6 +447,8 @@ export const appRouter = router({
           origin: user?.crmRole === "ce" ? "Telemarketing" : input.origin,
           notes: input.notes || null,
           addedBy: user?.id,
+          assignedTo: manualAssign,
+          lastAssignedAt: manualAssign ? new Date() : null,
           status: "novo",
           tenantId: contactTenantId,
         } as any);
@@ -375,6 +487,13 @@ export const appRouter = router({
           assigneeTenantOk = !!a[0] && Number(a[0].tenantId) === Number(user.tenantId);
         }
         if (!assigneeTenantOk) throw new Error("O vendedor de destino não pertence à mesma empresa.");
+
+        if (input.assignTo && ["ce", "cej"].includes(user?.crmRole ?? "")) {
+          const allowed = await getSellerIdsForPipelineScope(db, user);
+          if (allowed !== "ALL" && !allowed.includes(input.assignTo)) {
+            throw new Error("Só pode atribuir listas a membros da sua equipa.");
+          }
+        }
 
         const values = input.phones.map((phone, i) => ({
           phone,
@@ -465,7 +584,7 @@ export const appRouter = router({
       if (user?.crmRole === "vendedor") {
         conditions.push(eq(pendentes.vendedorId, user.id));
       } else {
-        const sellerIds = await getUserIdsInTenant(db, user);
+        const sellerIds = await getSellerIdsForPipelineScope(db, user);
         const tenantPV = whereInTenantUserIds(sellerIds, pendentes.vendedorId);
         if (tenantPV) conditions.push(tenantPV);
       }
@@ -599,6 +718,31 @@ export const appRouter = router({
           ).orderBy(desc(calendarEvents.startAt));
         }
 
+        if (["ce", "cej"].includes(user?.crmRole)) {
+          const teamIdsRaw = await getSellerIdsForPipelineScope(db, user);
+          if (teamIdsRaw === "ALL" || !teamIdsRaw.length) return [];
+
+          const coordRows = await db
+            .select({ id: users.id })
+            .from(users)
+            .where(and(eq(users.tenantId, user.tenantId as number), eq(users.crmRole, "coordenador")));
+          const coordIds = coordRows.map((c) => c.id);
+
+          const visibility: SQL[] = [
+            inArray(calendarEvents.assignedTo, teamIdsRaw),
+            inArray(calendarEvents.createdBy, teamIdsRaw),
+          ];
+          if (coordIds.length) {
+            visibility.push(and(isNull(calendarEvents.assignedTo), inArray(calendarEvents.createdBy, coordIds)) as SQL);
+          }
+
+          return await db
+            .select()
+            .from(calendarEvents)
+            .where(and(baseRange, or(...visibility)))
+            .orderBy(desc(calendarEvents.startAt));
+        }
+
         const calParts: SQL[] = [baseRange];
         if (!isSuperAdminUser(user) && user.tenantId != null) {
           calParts.push(eq(calendarEvents.tenantId, user.tenantId));
@@ -624,6 +768,10 @@ export const appRouter = router({
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+
+        if (!["coordenador", "ce", "cej"].includes(user?.crmRole ?? "") && !isSuperAdminUser(user)) {
+          throw new Error("Apenas Coordenador, Chefe de Equipa ou CEJ podem criar eventos de calendário.");
+        }
 
         const startAt = new Date(input.startAt);
         const endAt = input.endAt ? new Date(input.endAt) : null;
@@ -1298,7 +1446,7 @@ Regras:
       const today = new Date();
       today.setHours(0, 0, 0, 0);
 
-      const sellerIds = await getUserIdsInTenant(db, user);
+      const sellerIds = await getSellerIdsForPipelineScope(db, user);
       const tenantCallLogs = whereInTenantUserIds(sellerIds, callLogs.vendedorId);
       const tenantPendentesV = whereInTenantUserIds(sellerIds, pendentes.vendedorId);
       const tenantSalesV = whereInTenantUserIds(sellerIds, sales.vendedorId);
@@ -1322,9 +1470,9 @@ Regras:
       let callsResult;
       if (user?.crmRole === "vendedor") {
         callsResult = await db.select({ count: sql<number>`COUNT(*)` }).from(callLogs)
-          .where(and(eq(callLogs.vendedorId, user.id), sql`${callLogs.calledAt} >= ${today}`));
+          .where(and(eq(callLogs.vendedorId, user.id), gte(callLogs.calledAt, today)));
       } else {
-        const cparts: SQL[] = [sql`${callLogs.calledAt} >= ${today}`];
+        const cparts: SQL[] = [gte(callLogs.calledAt, today)];
         if (tenantCallLogs) cparts.push(tenantCallLogs);
         callsResult = await db.select({ count: sql<number>`COUNT(*)` }).from(callLogs)
           .where(and(...cparts));
@@ -1339,14 +1487,14 @@ Regras:
           .where(and(
             eq(pendentes.vendedorId, user.id),
             eq(pendentes.status, "agendado"),
-            sql`${pendentes.returnDate} >= ${today}`,
-            sql`${pendentes.returnDate} < ${tomorrow}`
+            gte(pendentes.returnDate, today),
+            lt(pendentes.returnDate, tomorrow),
           ));
       } else {
         const pparts: SQL[] = [
           eq(pendentes.status, "agendado"),
-          sql`${pendentes.returnDate} >= ${today}`,
-          sql`${pendentes.returnDate} < ${tomorrow}`,
+          gte(pendentes.returnDate, today),
+          lt(pendentes.returnDate, tomorrow),
         ];
         if (tenantPendentesV) pparts.push(tenantPendentesV);
         pendentesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
@@ -1357,7 +1505,7 @@ Regras:
       const now = new Date();
       const overdueConditions: SQL[] = [
         eq(pendentes.status, "agendado"),
-        sql`${pendentes.returnDate} < ${now}`,
+        lt(pendentes.returnDate, now),
       ];
       if (user?.crmRole === "vendedor") overdueConditions.push(eq(pendentes.vendedorId, user.id));
       else if (tenantPendentesV) overdueConditions.push(tenantPendentesV);
@@ -1527,7 +1675,7 @@ Regras:
         const dueWhere: SQL[] = [
           eq(pendentes.vendedorId, user.id),
           eq(pendentes.status, "agendado"),
-          sql`${pendentes.returnDate} <= ${now}`,
+          lte(pendentes.returnDate, now),
         ];
         if (pT) dueWhere.push(pT);
 
@@ -1733,8 +1881,10 @@ Regras:
       const now = new Date();
       const overdue: SQL[] = [
         eq(pendentes.status, "agendado"),
-        sql`${pendentes.returnDate} <= ${now}`,
+        lte(pendentes.returnDate, now),
       ];
+      const pvin = whereInTenantUserIds(await getSellerIdsForPipelineScope(db, user), pendentes.vendedorId);
+      if (pvin) overdue.push(pvin);
       const pten = whereContactsForUser(user as any);
       if (pten) overdue.push(pten);
       const due = await db
@@ -1758,6 +1908,11 @@ Regras:
         if (!db) return [];
 
         const user = ctx.user as any;
+        /** Vendedor / CEJ: não veem números (LGPD interno); usam apenas adicionar a partir do discador. */
+        if (user?.crmRole === "vendedor" || user?.crmRole === "cej") {
+          return [];
+        }
+
         const parts: SQL[] = [];
 
         if (!isSuperAdminUser(user)) {
@@ -1765,6 +1920,19 @@ Regras:
           if (scope === null || scope === undefined) return [];
           if (typeof scope === "number") {
             parts.push(eq(blacklist.tenantId, scope));
+          }
+
+          if (user?.crmRole === "ce") {
+            const teamScope = await resolveUserTeamScopeId(db, {
+              id: user.id,
+              teamId: user.teamId ?? null,
+              crmRole: user.crmRole,
+            });
+            if (teamScope != null) {
+              parts.push(eq(blacklist.teamId, teamScope));
+            } else {
+              return [];
+            }
           }
         }
 
@@ -1801,25 +1969,61 @@ Regras:
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
-        const tid = isSuperAdminUser(user) ? null : user.tenantId;
-        if (!isSuperAdminUser(user) && tid == null) {
-          throw new Error("Conta sem empresa; não pode gerir lista negra.");
-        }
+        const { tenantId: tidIns, teamId: teamIns } = await blacklistTeamScopeForInsert(db, user);
 
         await db.insert(blacklist).values({
-          phone: input.phone,
-          tenantId: tid,
+          phone: input.phone.trim(),
+          tenantId: tidIns,
+          teamId: teamIns,
           reason: input.reason || null,
           addedBy: user?.id,
         } as any);
 
-        const bu: SQL[] = [eq(contacts.phone, input.phone)];
+        const bu: SQL[] = [eq(contacts.phone, input.phone.trim())];
         const cten = whereContactsForUser(user);
         if (cten) bu.push(cten);
         await db.update(contacts)
           .set({ status: "blacklist" })
           .where(and(...bu));
 
+        return { success: true };
+      }),
+
+    remove: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        if (!["ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) {
+          throw new Error("Sem permissão para remover da lista negra.");
+        }
+
+        const [row] = await db.select().from(blacklist).where(eq(blacklist.id, input.id)).limit(1);
+        if (!row) return { success: true };
+
+        const scope = getScopedTenantCoordinatorUserId(user);
+        if (!isSuperAdminUser(user)) {
+          if (scope === null || typeof scope !== "number" || Number(row.tenantId) !== scope) {
+            throw new Error("Sem permissão sobre esta linha.");
+          }
+          if (user.crmRole === "ce") {
+            const ts = await resolveUserTeamScopeId(db, {
+              id: user.id,
+              teamId: user.teamId ?? null,
+              crmRole: user.crmRole,
+            });
+            if (ts == null) {
+              throw new Error("Equipa não resolvida.");
+            }
+            if (row.teamId != null && Number(row.teamId) !== ts) {
+              throw new Error("Só pode remover entradas da sua equipa.");
+            }
+          }
+        }
+
+        await db.delete(blacklist).where(eq(blacklist.id, input.id));
         return { success: true };
       }),
   }),
@@ -1834,7 +2038,7 @@ Regras:
       const mo = now.getMonth() + 1;
       const yr = now.getFullYear();
 
-      const sellerIds = await getUserIdsInTenant(db, user);
+      const sellerIds = await getSellerIdsForPipelineScope(db, user);
       const tenantV = whereInTenantUserIds(sellerIds, sales.vendedorId);
 
       const parts: SQL[] = [
@@ -1976,13 +2180,51 @@ Regras:
         if (user?.crmRole === "vendedor") {
           conditions.push(eq(sales.vendedorId, user.id));
         } else {
-          const tenantV = whereInTenantUserIds(await getUserIdsInTenant(db, user), sales.vendedorId);
+          const tenantV = whereInTenantUserIds(await getSellerIdsForPipelineScope(db, user), sales.vendedorId);
           if (tenantV) conditions.push(tenantV);
         }
 
         return await db.select().from(sales)
           .where(and(...conditions))
           .orderBy(desc(sales.closedAt));
+      }),
+
+    pipeline: protectedProcedure
+      .input(
+        z
+          .object({
+            status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).optional(),
+          })
+          .optional(),
+      )
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+        const ids = await getSellerIdsForPipelineScope(db, user);
+        const parts: SQL[] = [];
+        const vcond = whereInTenantUserIds(ids, sales.vendedorId);
+        if (vcond) parts.push(vcond);
+        const cten = whereContactsForUser(user);
+        if (cten) parts.push(cten);
+        if (input?.status) parts.push(eq(sales.status, input.status));
+        else parts.push(sql`${sales.status} <> 'cancelado'`);
+        const rows = await db
+          .select({
+            sale: sales,
+            contactName: contacts.name,
+            contactPhone: contacts.phone,
+          })
+          .from(sales)
+          .innerJoin(contacts, eq(sales.contactId, contacts.id))
+          .where(and(...parts))
+          .orderBy(desc(sales.updatedAt))
+          .limit(300);
+        return rows.map((r) => ({
+          ...r.sale,
+          contactName: r.contactName,
+          contactPhone: r.contactPhone,
+        }));
       }),
 
     create: protectedProcedure
@@ -2009,6 +2251,22 @@ Regras:
           installationDate: input.installationDate ? new Date(input.installationDate) : null,
           status: "aguarda_instalacao",
         });
+
+        const [created] = await db
+          .select({ id: sales.id })
+          .from(sales)
+          .where(and(eq(sales.contactId, input.contactId), eq(sales.vendedorId, user?.id as number)))
+          .orderBy(desc(sales.id))
+          .limit(1);
+
+        if (created?.id && input.installationDate && String(input.installationDate).trim()) {
+          await syncSaleInstallationCalendar(db, {
+            saleId: created.id,
+            contactId: input.contactId,
+            vendedorId: user?.id as number,
+            installationDate: new Date(input.installationDate),
+          });
+        }
 
         // Update contact status
         await db.update(contacts)
@@ -2064,6 +2322,21 @@ Regras:
           throw new Error("Defina a data de instalação ao marcar como Activo");
         }
         await db.update(sales).set(patch as any).where(eq(sales.id, input.saleId));
+
+        const [fresh] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (fresh) {
+          let instDate: Date | null = null;
+          if (fresh.installationDate != null) {
+            const d = fresh.installationDate instanceof Date ? fresh.installationDate : new Date(fresh.installationDate as string);
+            if (!Number.isNaN(d.getTime())) instDate = d;
+          }
+          await syncSaleInstallationCalendar(db, {
+            saleId: fresh.id,
+            contactId: fresh.contactId,
+            vendedorId: fresh.vendedorId,
+            installationDate: instDate,
+          });
+        }
 
         await db.insert(auditLogs).values({
           userId: user?.id,

@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/sidebar";
 // import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User, Ban } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User, Ban, ClipboardList } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -41,6 +41,7 @@ type MenuItem = {
 const menuItems: MenuItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/painel", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: PhoneCall, label: "Discador", path: "/discador", roles: ["vendedor", "cej", "ce"] },
+  { icon: ClipboardList, label: "Acompanhamento", path: "/acompanhamento", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Phone, label: "Contactos", path: "/contactos", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Ban, label: "Lista negra", path: "/lista-negra", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
