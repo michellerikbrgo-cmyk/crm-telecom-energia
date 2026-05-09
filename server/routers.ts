@@ -1032,6 +1032,8 @@ Regras:
           whatsappBusinessAccountId: "",
           whatsappAccessToken: "",
           whatsappVerifyToken: "",
+          userBroadcastAlert: "",
+          userBroadcastAlertRevision: 0,
         };
       }
 
@@ -1047,6 +1049,8 @@ Regras:
         whatsappBusinessAccountId: s.whatsappBusinessAccountId || "",
         whatsappAccessToken: maskSecret(decryptText(s.whatsappAccessTokenEnc)),
         whatsappVerifyToken: maskSecret(decryptText(s.whatsappVerifyTokenEnc)),
+        userBroadcastAlert: typeof s.userBroadcastAlert === "string" ? s.userBroadcastAlert : "",
+        userBroadcastAlertRevision: s.userBroadcastAlertRevision ?? 0,
       };
     }),
 
@@ -1063,6 +1067,7 @@ Regras:
         whatsappPhoneNumberId: z.string().optional(),
         whatsappBusinessAccountId: z.string().optional(),
         whatsappVerifyToken: z.string().optional(),
+        userBroadcastAlert: z.string().nullable().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -1095,6 +1100,14 @@ Regras:
         setSecret("whatsappAccessTokenEnc", input.whatsappAccessToken);
         setSecret("whatsappVerifyTokenEnc", input.whatsappVerifyToken);
 
+        if (input.userBroadcastAlert !== undefined) {
+          const trimmed =
+            input.userBroadcastAlert === null ? "" : String(input.userBroadcastAlert).trim();
+          update.userBroadcastAlert = trimmed || null;
+          const prevRev = Number(existing[0]?.userBroadcastAlertRevision ?? 0);
+          update.userBroadcastAlertRevision = prevRev + 1;
+        }
+
         if (existing[0]) {
           await db.update(appSettings).set(update).where(eq(appSettings.id, existing[0].id));
         } else {
@@ -1110,6 +1123,8 @@ Regras:
             whatsappPhoneNumberId: update.whatsappPhoneNumberId ?? null,
             whatsappBusinessAccountId: update.whatsappBusinessAccountId ?? null,
             whatsappVerifyTokenEnc: update.whatsappVerifyTokenEnc ?? null,
+            userBroadcastAlert: update.userBroadcastAlert ?? null,
+            userBroadcastAlertRevision: update.userBroadcastAlertRevision ?? 0,
             updatedBy: user?.id,
           } as any);
         }

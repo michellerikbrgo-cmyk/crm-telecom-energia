@@ -1,13 +1,15 @@
+import { RELEASE_LOG_RETENTION_DAYS } from "@shared/const";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, ScrollText } from "lucide-react";
+import { AlertTriangle, Hourglass, ScrollText } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 
@@ -16,19 +18,76 @@ function formatReleaseAt(iso: string) {
     return new Date(iso).toLocaleString("pt-PT", {
       dateStyle: "short",
       timeStyle: "short",
+      timeZone: "Europe/Lisbon",
     });
   } catch {
     return iso;
   }
 }
 
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function formatCountdownPt(ms: number) {
+  if (ms <= 0) return "0s";
+  const totalSec = Math.floor(ms / 1000);
+  const d = Math.floor(totalSec / 86400);
+  const h = Math.floor((totalSec % 86400) / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  if (d > 0) return `${d}d ${h}h ${m}min`;
+  if (h > 0) return `${h}h ${m}min ${s}s`;
+  if (m > 0) return `${m}min ${s}s`;
+  return `${s}s`;
+}
+
+function ReleaseLogRetentionCountdown({ atIso }: { atIso: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(tick);
+  }, []);
+
+  const start = new Date(atIso).getTime();
+  if (Number.isNaN(start)) return null;
+  const expires = start + RELEASE_LOG_RETENTION_DAYS * MS_PER_DAY;
+  const left = expires - now;
+  const expiresLabel = new Date(expires).toLocaleString("pt-PT", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone: "Europe/Lisbon",
+  });
+
+  if (left <= 0) {
+    return (
+      <span className="text-xs text-muted-foreground tabular-nums">
+        Fora dos {RELEASE_LOG_RETENTION_DAYS} dias
+      </span>
+    );
+  }
+
+  return (
+    <span className="block text-xs text-muted-foreground tabular-nums mt-1 space-y-0.5">
+      <span className="inline-flex items-center gap-1.5 text-amber-700 dark:text-amber-400/90 font-medium">
+        <Hourglass className="h-3.5 w-3.5 shrink-0" aria-hidden />
+        Expira dentro de {formatCountdownPt(left)}
+      </span>
+      <span className="block">
+        Remoção automática do histórico: <span className="text-foreground/80">{expiresLabel}</span>{" "}
+        (Lisboa)
+      </span>
+    </span>
+  );
+}
+
 export default function SuperAdmin() {
+  const utils = trpc.useUtils();
   const settingsQuery = trpc.admin.getSettings.useQuery();
   const releaseLogQuery = trpc.admin.getReleaseLog.useQuery();
   const updateMutation = trpc.admin.updateSettings.useMutation({
     onSuccess: async () => {
       toast.success("Configurações guardadas");
       await settingsQuery.refetch();
+      await utils.system.getUserBroadcastAlert.invalidate();
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -54,10 +113,25 @@ export default function SuperAdmin() {
 
   const [purgeScope, setPurgeScope] = useState<"crm_only" | "all_except_audit">("crm_only");
   const [purgeConfirm, setPurgeConfirm] = useState("");
+  const [broadcastDraft, setBroadcastDraft] = useState("");
 
   useEffect(() => {
-    if (!settingsQuery.data) return;
-    setForm(settingsQuery.data as any);
+    const d = settingsQuery.data;
+    if (!d) return;
+    setBroadcastDraft(d.userBroadcastAlert ?? "");
+    setForm({
+      aiEnabled: d.aiEnabled,
+      preferredAiProvider: d.preferredAiProvider as typeof form.preferredAiProvider,
+      openaiApiKey: d.openaiApiKey ?? "",
+      geminiApiKey: d.geminiApiKey ?? "",
+      deepseekApiKey: d.deepseekApiKey ?? "",
+      claudeApiKey: d.claudeApiKey ?? "",
+      whatsappEnabled: d.whatsappEnabled,
+      whatsappAccessToken: d.whatsappAccessToken ?? "",
+      whatsappPhoneNumberId: d.whatsappPhoneNumberId ?? "",
+      whatsappBusinessAccountId: d.whatsappBusinessAccountId ?? "",
+      whatsappVerifyToken: d.whatsappVerifyToken ?? "",
+    });
   }, [settingsQuery.data]);
 
   return (
@@ -76,10 +150,11 @@ export default function SuperAdmin() {
               Log de actualização do sistema
             </CardTitle>
             <p className="text-sm text-muted-foreground font-normal">
-              Em cada <code className="text-xs">pnpm run deploy:pm2</code> regista-se automaticamente uma linha
-              (versão, ref. de deploy, sumário do último commit). O ficheiro{" "}
-              <code className="text-xs">release-log-bootstrap.json</code> na raiz do projecto fornece o histórico
-              inicial até ao primeiro deploy no servidor.
+              Em cada <code className="text-xs">pnpm run deploy:pm2</code> regista-se uma linha (versão, ref. do
+              deploy, sumário). Entradas com mais de <strong>{RELEASE_LOG_RETENTION_DAYS} dias</strong> são
+              removidas do ficheiro no servidor ao gravar novo deploy e deixam de aparecer aqui.{" "}
+              <code className="text-xs">release-log-bootstrap.json</code> fornece o histórico inicial até ao
+              primeiro deploy.
             </p>
           </CardHeader>
           <CardContent>
@@ -115,6 +190,7 @@ export default function SuperAdmin() {
                           </span>
                         ) : null}
                       </div>
+                      <ReleaseLogRetentionCountdown atIso={entry.at} />
 
                       {entry.title ? (
                         <h3 className="font-semibold text-foreground mb-2">{entry.title}</h3>
@@ -142,6 +218,50 @@ export default function SuperAdmin() {
                 </div>
               )}
             </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <Card className="border-0 shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg">Alerta aos utilizadores</CardTitle>
+            <p className="text-sm text-muted-foreground font-normal">
+              Mensagem temporária no topo do painel para vendedores, CEJ, CE e coordenadores. O Super Admin não vê este
+              aviso durante a navegação (apenas outros perfis). Cada novo texto incrementa uma revisão: quem já tiver fechado
+              o anterior volta a ver o novo alerta.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="broadcast-draft">Texto do aviso</Label>
+              <Textarea
+                id="broadcast-draft"
+                placeholder="Ex.: Manutenção hoje das 22h às 23h."
+                rows={4}
+                value={broadcastDraft}
+                onChange={(e) => setBroadcastDraft(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Revisão actual dos alertas (interno):{" "}
+                <span className="font-mono text-foreground">{settingsQuery.data?.userBroadcastAlertRevision ?? 0}</span>
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                disabled={updateMutation.isPending}
+                onClick={() => updateMutation.mutate({ userBroadcastAlert: broadcastDraft })}
+              >
+                {updateMutation.isPending ? "A publicar..." : "Publicar aviso"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={updateMutation.isPending}
+                onClick={() => updateMutation.mutate({ userBroadcastAlert: "" })}
+              >
+                Limpar aviso
+              </Button>
+            </div>
           </CardContent>
         </Card>
 

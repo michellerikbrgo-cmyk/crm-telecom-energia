@@ -26,6 +26,7 @@ import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { SessionBar } from "@/components/SessionBar";
+import { UserBroadcastBanner } from "@/components/UserBroadcastBanner";
 import { UserProfileDialog } from "@/components/UserProfileDialog";
 import { trpc } from "@/lib/trpc";
 import { Button } from "./ui/button";
@@ -319,6 +320,7 @@ function DashboardLayoutContent({
         )}
         <main className="flex-1 flex flex-col gap-4 p-4 min-h-0">
           <SessionBar />
+          <UserBroadcastBanner hideForSuperAdmin={isSuperAdmin} />
           <div className="flex-1 min-w-0 min-h-0">{children}</div>
         </main>
       </SidebarInset>

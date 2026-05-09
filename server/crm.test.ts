@@ -118,4 +118,8 @@ describe("CRM Router Structure", () => {
   it("should have admin.getReleaseLog for Super Admin changelog", () => {
     expect(appRouter._def.procedures).toHaveProperty("admin.getReleaseLog");
   });
+
+  it("should have system.getUserBroadcastAlert", () => {
+    expect(appRouter._def.procedures).toHaveProperty("system.getUserBroadcastAlert");
+  });
 });

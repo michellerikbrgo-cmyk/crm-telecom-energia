@@ -14,6 +14,8 @@ const ROOT = join(__dirname, "..");
 const DATA_PATH = join(ROOT, "data", "release-log.json");
 const BOOT_PATH = join(ROOT, "release-log-bootstrap.json");
 const PKG_PATH = join(ROOT, "package.json");
+/** Alinhado com @shared/const RELEASE_LOG_RETENTION_DAYS */
+const RELEASE_LOG_RETENTION_MS = 15 * 24 * 60 * 60 * 1000;
 
 function parseEntries(raw) {
   if (Array.isArray(raw)) return raw;
@@ -64,6 +66,12 @@ async function main() {
     deployRef,
     summary,
     automated: true,
+  });
+
+  const horizon = Date.now() - RELEASE_LOG_RETENTION_MS;
+  entries = entries.filter((e) => {
+    const t = new Date(e.at).getTime();
+    return !Number.isNaN(t) && t >= horizon;
   });
 
   /** Limite razoável para não crescer sem fim (~2 anos deploy diário). */

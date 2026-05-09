@@ -57,6 +57,9 @@ export const appSettings = mysqlTable("appSettings", {
   /** Legado (não usado pela app). */
   forgeApiUrl: varchar("forgeApiUrl", { length: 512 }),
   forgeApiKeyEnc: text("forgeApiKeyEnc"),
+  /** Mensagem global mostrada aos utilizadores (exc. Super Admin). Incrementa revisão ao guardar. */
+  userBroadcastAlert: text("userBroadcastAlert"),
+  userBroadcastAlertRevision: int("userBroadcastAlertRevision").default(0).notNull(),
   // audit
   updatedBy: int("updatedBy"),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

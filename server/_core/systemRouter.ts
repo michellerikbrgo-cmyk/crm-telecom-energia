@@ -1,7 +1,9 @@
+import { appSettings } from "../../drizzle/schema";
 import { z } from "zod";
 import { buildHealthPayload } from "./appVersion";
 import { notifyOwner } from "./notification";
-import { adminProcedure, publicProcedure, router } from "./trpc";
+import { getDb } from "../db";
+import { adminProcedure, protectedProcedure, publicProcedure, router } from "./trpc";
 
 export const systemRouter = router({
   /** Sem input — útil para confirmar deploy / versão da API. */
@@ -30,4 +32,25 @@ export const systemRouter = router({
         success: delivered,
       } as const;
     }),
+
+  /** Aviso configurado na Super Admin para todos os utilizadores autenticados (UI omite Super Admin). */
+  getUserBroadcastAlert: protectedProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) {
+      return { message: null as string | null, revision: 0 };
+    }
+    const rows = await db
+      .select({
+        message: appSettings.userBroadcastAlert,
+        revision: appSettings.userBroadcastAlertRevision,
+      })
+      .from(appSettings)
+      .limit(1);
+    const r = rows[0];
+    const msg = typeof r?.message === "string" ? r.message.trim() : "";
+    if (!msg) {
+      return { message: null as string | null, revision: r?.revision ?? 0 };
+    }
+    return { message: msg, revision: r?.revision ?? 0 };
+  }),
 });
