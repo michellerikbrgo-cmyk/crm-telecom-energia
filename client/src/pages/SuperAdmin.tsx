@@ -36,6 +36,8 @@ export default function SuperAdmin() {
     whatsappPhoneNumberId: "",
     whatsappBusinessAccountId: "",
     whatsappVerifyToken: "",
+    forgeApiUrl: "",
+    forgeApiKey: "",
   });
 
   const [purgeScope, setPurgeScope] = useState<"crm_only" | "all_except_audit">("crm_only");
@@ -50,7 +52,9 @@ export default function SuperAdmin() {
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Super Admin</h1>
-          <p className="text-muted-foreground">Chaves de IA, toggles e integração WhatsApp</p>
+          <p className="text-muted-foreground">
+            Chaves de IA, Forge/armazenamento, WhatsApp e zona de perigo
+          </p>
         </div>
 
         <Card className="border-0 shadow-sm">
@@ -126,6 +130,49 @@ export default function SuperAdmin() {
               onClick={() => updateMutation.mutate(form as any)}
             >
               {updateMutation.isPending ? "A guardar..." : "Guardar IA"}
+            </Button>
+          </CardContent>
+        </Card>
+
+        <Card className="border-0 shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg">Forge / Armazenamento (API)</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Usado para uploads (PDFs, fotos de perfil), proxy <code className="text-xs">/manus-storage</code>, IA via
+              Forge e outros serviços Manus. Se definir{" "}
+              <code className="text-xs">BUILT_IN_FORGE_API_URL</code> /{" "}
+              <code className="text-xs">BUILT_IN_FORGE_API_KEY</code> no servidor, esses valores têm prioridade sobre os
+              campos abaixo.
+            </p>
+            <div className="space-y-2">
+              <Label>URL base da API Forge</Label>
+              <Input
+                placeholder="https://forge.manus.im (opcional se usar só o token no host por defeito)"
+                value={form.forgeApiUrl}
+                onChange={(e) => setForm((s) => ({ ...s, forgeApiUrl: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>API Key (Bearer)</Label>
+              <Input
+                placeholder="(deixa vazio para manter o valor actual)"
+                value={form.forgeApiKey}
+                onChange={(e) => setForm((s) => ({ ...s, forgeApiKey: e.target.value }))}
+              />
+            </div>
+            <Button
+              className="w-full"
+              disabled={updateMutation.isPending}
+              onClick={() =>
+                updateMutation.mutate({
+                  forgeApiUrl: form.forgeApiUrl,
+                  forgeApiKey: form.forgeApiKey,
+                } as any)
+              }
+            >
+              {updateMutation.isPending ? "A guardar..." : "Guardar Forge"}
             </Button>
           </CardContent>
         </Card>

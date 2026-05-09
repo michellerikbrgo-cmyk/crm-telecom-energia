@@ -25,7 +25,7 @@
  * });
  * ```
  */
-import { ENV } from "./env";
+import { getForgeRuntimeConfig } from "../forgeRuntime";
 
 export type TranscribeOptions = {
   audioUrl: string; // URL to the audio file (e.g., S3 URL)
@@ -74,19 +74,12 @@ export async function transcribeAudio(
   options: TranscribeOptions
 ): Promise<TranscriptionResponse | TranscriptionError> {
   try {
-    // Step 1: Validate environment configuration
-    if (!ENV.forgeApiUrl) {
+    const forgeCfg = await getForgeRuntimeConfig();
+    if (!forgeCfg) {
       return {
         error: "Voice transcription service is not configured",
         code: "SERVICE_ERROR",
-        details: "BUILT_IN_FORGE_API_URL is not set"
-      };
-    }
-    if (!ENV.forgeApiKey) {
-      return {
-        error: "Voice transcription service authentication is missing",
-        code: "SERVICE_ERROR",
-        details: "BUILT_IN_FORGE_API_KEY is not set"
+        details: "Forge API não configurada (env ou Super Admin)",
       };
     }
 
@@ -143,10 +136,10 @@ export async function transcribeAudio(
     formData.append("prompt", prompt);
 
     // Step 4: Call the transcription service
-    const baseUrl = ENV.forgeApiUrl.endsWith("/")
-      ? ENV.forgeApiUrl
-      : `${ENV.forgeApiUrl}/`;
-    
+    const baseUrl = forgeCfg.forgeUrl.endsWith("/")
+      ? forgeCfg.forgeUrl
+      : `${forgeCfg.forgeUrl}/`;
+
     const fullUrl = new URL(
       "v1/audio/transcriptions",
       baseUrl
@@ -155,7 +148,7 @@ export async function transcribeAudio(
     const response = await fetch(fullUrl, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${ENV.forgeApiKey}`,
+        authorization: `Bearer ${forgeCfg.forgeKey}`,
         "Accept-Encoding": "identity",
       },
       body: formData,

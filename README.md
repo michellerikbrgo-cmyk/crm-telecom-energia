@@ -95,6 +95,27 @@ Garante que `NODE_ENV=production` e que o processo lê o mesmo `.env` (ou variá
 
 O servidor usa `trust proxy` para obter o IP real atrás de Nginx ou outro reverse proxy — importante para sessão, presença e auditoria.
 
+## Dados de demonstração (seed)
+
+Após migrações e com `DATABASE_URL` definido:
+
+```bash
+pnpm seed
+```
+
+Cria uma empresa demo (coordenador + vendedor), equipa, contactos, campanha, pendente, evento de calendário, origem, tarifário energia, script concorrente, venda exemplo e SOS de teste.
+
+Contas (palavra-passe igual para ambas: **`Demo2026!`**):
+
+- `demo.coordenador@crm-seed.local`
+- `demo.vendedor@crm-seed.local`
+
+O comando é **idempotente**: se o coordenador demo já existir, não altera nada.
+
+## Documentação da API (exemplos)
+
+Lista de procedimentos tRPC com **payloads realistas** (contactos, campanhas, discador, Super Admin, sessão, etc.): [docs/EXEMPLOS-FUNCOES.md](docs/EXEMPLOS-FUNCOES.md).
+
 ## Licença
 
 MIT (ver `package.json`).

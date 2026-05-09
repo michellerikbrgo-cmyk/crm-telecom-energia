@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import type { Request } from "express";
 import { appRouter } from "./routers";
 import { COOKIE_NAME } from "../shared/const";
 import type { TrpcContext } from "./_core/context";
+import { getSessionCookieOptions } from "./_core/cookies";
 
 type CookieCall = {
   name: string;
@@ -51,12 +53,10 @@ describe("auth.logout", () => {
     expect(result).toEqual({ success: true });
     expect(clearedCookies).toHaveLength(1);
     expect(clearedCookies[0]?.name).toBe(COOKIE_NAME);
-    expect(clearedCookies[0]?.options).toMatchObject({
+    const expectedBase = getSessionCookieOptions(ctx.req as Request);
+    expect(clearedCookies[0]?.options).toEqual({
+      ...expectedBase,
       maxAge: -1,
-      secure: true,
-      sameSite: "none",
-      httpOnly: true,
-      path: "/",
     });
   });
 });

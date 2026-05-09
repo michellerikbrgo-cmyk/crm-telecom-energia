@@ -1,5 +1,5 @@
 import type { Express } from "express";
-import { ENV } from "./env";
+import { getForgeRuntimeConfig } from "../forgeRuntime";
 
 export function registerStorageProxy(app: Express) {
   app.get("/manus-storage/*", async (req, res) => {
@@ -9,7 +9,8 @@ export function registerStorageProxy(app: Express) {
       return;
     }
 
-    if (!ENV.forgeApiUrl || !ENV.forgeApiKey) {
+    const cfg = await getForgeRuntimeConfig();
+    if (!cfg) {
       res.status(500).send("Storage proxy not configured");
       return;
     }
@@ -17,12 +18,12 @@ export function registerStorageProxy(app: Express) {
     try {
       const forgeUrl = new URL(
         "v1/storage/presign/get",
-        ENV.forgeApiUrl.replace(/\/+$/, "") + "/",
+        cfg.forgeUrl + "/",
       );
       forgeUrl.searchParams.set("path", key);
 
       const forgeResp = await fetch(forgeUrl, {
-        headers: { Authorization: `Bearer ${ENV.forgeApiKey}` },
+        headers: { Authorization: `Bearer ${cfg.forgeKey}` },
       });
 
       if (!forgeResp.ok) {

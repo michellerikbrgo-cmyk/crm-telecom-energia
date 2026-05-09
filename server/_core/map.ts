@@ -7,7 +7,7 @@
  * See API examples below the type definitions for usage patterns.
  */
 
-import { ENV } from "./env";
+import { getForgeRuntimeConfig } from "../forgeRuntime";
 
 // ============================================================================
 // Configuration
@@ -18,19 +18,17 @@ type MapsConfig = {
   apiKey: string;
 };
 
-function getMapsConfig(): MapsConfig {
-  const baseUrl = ENV.forgeApiUrl;
-  const apiKey = ENV.forgeApiKey;
-
-  if (!baseUrl || !apiKey) {
+async function getMapsConfig(): Promise<MapsConfig> {
+  const cfg = await getForgeRuntimeConfig();
+  if (!cfg) {
     throw new Error(
-      "Google Maps proxy credentials missing: set BUILT_IN_FORGE_API_URL and BUILT_IN_FORGE_API_KEY"
+      "Google Maps proxy credentials missing: configure Forge na variável de ambiente ou na página Super Admin",
     );
   }
 
   return {
-    baseUrl: baseUrl.replace(/\/+$/, ""),
-    apiKey,
+    baseUrl: cfg.forgeUrl.replace(/\/+$/, ""),
+    apiKey: cfg.forgeKey,
   };
 }
 
@@ -56,7 +54,7 @@ export async function makeRequest<T = unknown>(
   params: Record<string, unknown> = {},
   options: RequestOptions = {}
 ): Promise<T> {
-  const { baseUrl, apiKey } = getMapsConfig();
+  const { baseUrl, apiKey } = await getMapsConfig();
 
   // Construct full URL: baseUrl + /v1/maps/proxy + endpoint
   const url = new URL(`${baseUrl}/v1/maps/proxy${endpoint}`);

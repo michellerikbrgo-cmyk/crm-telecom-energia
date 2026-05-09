@@ -26,7 +26,10 @@ const STATS_EMPTY = {
     returnDate: Date;
     contactPhone: string | null;
     contactName: string | null;
+    priorityLevel?: number;
+    vendedorName?: string | null;
   }>,
+  dialerQueueEligibleCount: 0,
   rankingPosition: null as number | null,
 };
 
@@ -146,6 +149,25 @@ export default function Home() {
           </Card>
         </div>
 
+        {typeof stats.dialerQueueEligibleCount === "number" &&
+          stats.dialerQueueEligibleCount < 10 &&
+          ["vendedor", "cej", "ce"].includes(crmRole) && (
+          <Card className="border border-amber-500/40 bg-amber-500/5 shadow-sm">
+            <CardContent className="py-4 text-sm">
+              <div className="font-medium text-amber-900 dark:text-amber-100 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                Poucos contactos na fila do discador
+              </div>
+              <p className="text-muted-foreground mt-1">
+                Elegíveis para marcação agora: <strong>{stats.dialerQueueEligibleCount}</strong>.
+                {["ce", "coordenador"].includes(crmRole)
+                  ? " Carregue mais leads na Base de Dados."
+                  : " Avise o Chefe de Equipa para repor o stock de números."}
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         {stats.overduePendenteCount > 0 && (
           <Card className="border border-destructive/40 bg-destructive/5 shadow-sm">
             <CardHeader className="pb-2">
@@ -163,9 +185,15 @@ export default function Home() {
                   <div className="min-w-0">
                     <span className="font-medium truncate block">
                       {a.contactPhone || `Contacto #${a.contactId}`}
+                      {typeof a.priorityLevel === "number" ? (
+                        <Badge variant="outline" className="ml-2 text-[10px] px-1.5 py-0">
+                          P{a.priorityLevel}
+                        </Badge>
+                      ) : null}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       {new Date(a.returnDate).toLocaleString("pt-PT")}
+                      {a.vendedorName ? ` · ${a.vendedorName}` : ""}
                     </span>
                   </div>
                   <Button size="sm" variant="outline" onClick={() => setLocation("/discador")}>
@@ -234,8 +262,8 @@ export default function Home() {
                 variant="outline"
                 className="w-full justify-start gap-2 h-11"
                 onClick={async () => {
-                  if (crmRole !== "vendedor") {
-                    toast.info("A fila «próximo contacto» é usada por vendedores; abra o Discador ou Supervisão conforme o seu perfil.");
+                  if (!["vendedor", "cej", "ce"].includes(crmRole)) {
+                    toast.info("Abra o Discador ou Supervisão conforme o seu perfil.");
                     setLocation(seesSupervision ? "/supervisao" : "/contactos");
                     return;
                   }

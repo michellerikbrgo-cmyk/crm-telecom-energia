@@ -38,6 +38,7 @@ import {
 } from "./tenantScope";
 import OpenAI from "openai";
 import { storagePut } from "./storage";
+import { invalidateForgeRuntimeCache } from "./forgeRuntime";
 import { decryptText, encryptText, maskSecret } from "./_core/cryptoSecrets";
 import {
   getClientIp,
@@ -48,7 +49,17 @@ import {
 
 function canManageCampaigns(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
-  return !!(u?.isSuperAdmin || u?.crmRole === "ce" || u?.crmRole === "coordenador");
+  return !!(
+    u?.isSuperAdmin ||
+    u?.crmRole === "ce" ||
+    u?.crmRole === "cej" ||
+    u?.crmRole === "coordenador"
+  );
+}
+
+function canUseDialer(user: unknown): boolean {
+  const u = user as { crmRole?: string } | null;
+  return ["vendedor", "cej", "ce"].includes(u?.crmRole || "");
 }
 
 function canEditContactsAsManager(user: unknown): boolean {
@@ -141,6 +152,51 @@ export const appRouter = router({
         }
       }
       return { success: true } as const;
+    }),
+
+    uploadAvatar: protectedProcedure
+      .input(
+        z.object({
+          base64: z.string().min(1),
+          mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const user = ctx.user as { id?: number };
+        if (!user?.id) throw new Error("Sessão inválida");
+
+        const buffer = Buffer.from(input.base64, "base64");
+        if (buffer.byteLength > 2 * 1024 * 1024) {
+          throw new Error("Imagem demasiado grande (máx. 2MB)");
+        }
+
+        const db = await getDb();
+        if (!db) throw new Error("Base de dados indisponível");
+
+        const ext =
+          input.mimeType === "image/jpeg" ? "jpg" : input.mimeType === "image/png" ? "png" : "webp";
+        const { url } = await storagePut(`avatars/${user.id}/profile.${ext}`, buffer, input.mimeType);
+
+        await db.update(users).set({ avatarUrl: url } as any).where(eq(users.id, user.id));
+
+        await db.insert(auditLogs).values({
+          userId: user.id,
+          action: "profile_avatar_upload",
+          entity: "user",
+          entityId: user.id,
+          details: "Atualizou foto de perfil",
+        });
+
+        return { success: true, avatarUrl: url };
+      }),
+
+    removeAvatar: protectedProcedure.mutation(async ({ ctx }) => {
+      const user = ctx.user as { id?: number };
+      if (!user?.id) throw new Error("Sessão inválida");
+      const db = await getDb();
+      if (!db) throw new Error("Base de dados indisponível");
+      await db.update(users).set({ avatarUrl: null } as any).where(eq(users.id, user.id));
+      return { success: true };
     }),
   }),
 
@@ -352,6 +408,10 @@ export const appRouter = router({
 
       if (user?.crmRole === "vendedor") {
         conditions.push(eq(pendentes.vendedorId, user.id));
+      } else {
+        const sellerIds = await getUserIdsInTenant(db, user);
+        const tenantPV = whereInTenantUserIds(sellerIds, pendentes.vendedorId);
+        if (tenantPV) conditions.push(tenantPV);
       }
 
       let query = db.select({
@@ -363,6 +423,7 @@ export const appRouter = router({
         offerDesired: pendentes.offerDesired,
         status: pendentes.status,
         notified: pendentes.notified,
+        priorityLevel: pendentes.priorityLevel,
         createdAt: pendentes.createdAt,
         updatedAt: pendentes.updatedAt,
         contactName: contacts.name,
@@ -373,7 +434,9 @@ export const appRouter = router({
         query = query.where(and(...conditions)) as any;
       }
 
-      return await (query as any).orderBy(desc(pendentes.returnDate)).limit(50);
+      return await (query as any)
+        .orderBy(desc(pendentes.priorityLevel), asc(pendentes.returnDate))
+        .limit(50);
     }),
 
     create: protectedProcedure
@@ -382,6 +445,7 @@ export const appRouter = router({
         returnDate: z.string(),
         notes: z.string().optional(),
         offerDesired: z.string().optional(),
+        priorityLevel: z.number().int().min(1).max(5).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -397,6 +461,7 @@ export const appRouter = router({
           notes: input.notes || null,
           offerDesired: input.offerDesired || null,
           status: "agendado",
+          priorityLevel: input.priorityLevel ?? 3,
         });
 
         await db.update(contacts)
@@ -413,6 +478,7 @@ export const appRouter = router({
         notes: z.string().optional().nullable(),
         offerDesired: z.string().optional().nullable(),
         status: z.enum(["agendado", "realizado", "expirado", "cancelado"]).optional(),
+        priorityLevel: z.number().int().min(1).max(5).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -436,6 +502,7 @@ export const appRouter = router({
         if (input.notes !== undefined) payload.notes = input.notes;
         if (input.offerDesired !== undefined) payload.offerDesired = input.offerDesired;
         if (input.status !== undefined) payload.status = input.status;
+        if (input.priorityLevel !== undefined) payload.priorityLevel = input.priorityLevel;
         if (Object.keys(payload).length === 0) return { success: true };
 
         await db.update(pendentes).set(payload as any).where(eq(pendentes.id, input.id));
@@ -664,7 +731,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         if (!canManageCampaigns(ctx.user)) {
-          throw new Error("Só Chefes de Equipa e Coordenadores podem criar campanhas");
+          throw new Error("Só Chefes de Equipa, CEJ e Coordenadores podem criar campanhas");
         }
         const db = await getDb();
         if (!db) throw new Error("Database not available");
@@ -737,7 +804,7 @@ export const appRouter = router({
       }))
       .mutation(async ({ ctx, input }) => {
         if (!canManageCampaigns(ctx.user)) {
-          throw new Error("Só Chefes de Equipa e Coordenadores podem carregar PDFs");
+          throw new Error("Só Chefes de Equipa, CEJ e Coordenadores podem carregar PDFs");
         }
         const db = await getDb();
         if (!db) throw new Error("Database not available");
@@ -825,10 +892,24 @@ Regras:
           // Fallback to OpenAI
         }
 
-        // Fallback: OpenAI
-        const openaiKey = process.env.OPENAI_API_KEY;
+        let dbOpenaiKey = "";
+        try {
+          const adb = await getDb();
+          if (adb) {
+            const sk = await adb.select().from(appSettings).limit(1);
+            const enc = sk[0]?.openaiApiKeyEnc;
+            if (enc) dbOpenaiKey = decryptText(enc);
+          }
+        } catch {
+          /* ignore */
+        }
+
+        const openaiKey = process.env.OPENAI_API_KEY?.trim() || dbOpenaiKey.trim();
         if (!openaiKey) {
-          return { response: "IA indisponível. Configure a chave OPENAI_API_KEY no servidor." };
+          return {
+            response:
+              "IA indisponível. Configure OpenAI na página Super Admin ou OPENAI_API_KEY no servidor.",
+          };
         }
         const openai = new OpenAI({ apiKey: openaiKey });
         const completion = await openai.chat.completions.create({
@@ -864,6 +945,8 @@ Regras:
           whatsappBusinessAccountId: "",
           whatsappAccessToken: "",
           whatsappVerifyToken: "",
+          forgeApiUrl: "",
+          forgeApiKey: "",
         };
       }
 
@@ -879,6 +962,8 @@ Regras:
         whatsappBusinessAccountId: s.whatsappBusinessAccountId || "",
         whatsappAccessToken: maskSecret(decryptText(s.whatsappAccessTokenEnc)),
         whatsappVerifyToken: maskSecret(decryptText(s.whatsappVerifyTokenEnc)),
+        forgeApiUrl: (s as { forgeApiUrl?: string | null }).forgeApiUrl || "",
+        forgeApiKey: maskSecret(decryptText((s as { forgeApiKeyEnc?: string | null }).forgeApiKeyEnc)),
       };
     }),
 
@@ -895,6 +980,8 @@ Regras:
         whatsappPhoneNumberId: z.string().optional(),
         whatsappBusinessAccountId: z.string().optional(),
         whatsappVerifyToken: z.string().optional(),
+        forgeApiUrl: z.string().optional(),
+        forgeApiKey: z.string().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -927,6 +1014,12 @@ Regras:
         setSecret("whatsappAccessTokenEnc", input.whatsappAccessToken);
         setSecret("whatsappVerifyTokenEnc", input.whatsappVerifyToken);
 
+        if (input.forgeApiUrl !== undefined) {
+          const t = input.forgeApiUrl.trim();
+          update.forgeApiUrl = t || null;
+        }
+        setSecret("forgeApiKeyEnc", input.forgeApiKey);
+
         if (existing[0]) {
           await db.update(appSettings).set(update).where(eq(appSettings.id, existing[0].id));
         } else {
@@ -942,9 +1035,13 @@ Regras:
             whatsappPhoneNumberId: update.whatsappPhoneNumberId ?? null,
             whatsappBusinessAccountId: update.whatsappBusinessAccountId ?? null,
             whatsappVerifyTokenEnc: update.whatsappVerifyTokenEnc ?? null,
+            forgeApiUrl: update.forgeApiUrl ?? null,
+            forgeApiKeyEnc: update.forgeApiKeyEnc ?? null,
             updatedBy: user?.id,
           } as any);
         }
+
+        invalidateForgeRuntimeCache();
 
         await db.insert(auditLogs).values({
           userId: user?.id,
@@ -1104,7 +1201,10 @@ Regras:
             returnDate: Date;
             contactPhone: string | null;
             contactName: string | null;
+            priorityLevel: number;
+            vendedorName: string | null;
           }>,
+          dialerQueueEligibleCount: 0,
           rankingPosition: null as number | null,
         };
       }
@@ -1117,6 +1217,20 @@ Regras:
       const tenantPendentesV = whereInTenantUserIds(sellerIds, pendentes.vendedorId);
       const tenantSalesV = whereInTenantUserIds(sellerIds, sales.vendedorId);
       const contactTenant = whereContactsForUser(user);
+
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      const queueParts: SQL[] = [
+        eq(contacts.status, "novo"),
+        or(
+          sql`${contacts.lastAssignedAt} IS NULL`,
+          sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`,
+        ) as SQL,
+      ];
+      if (contactTenant) queueParts.unshift(contactTenant);
+      const dialerQueueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(contacts)
+        .where(and(...queueParts));
+      const dialerQueueEligibleCount = Number(dialerQueueResult[0]?.count ?? 0);
 
       // Calls today
       let callsResult;
@@ -1172,9 +1286,13 @@ Regras:
         returnDate: pendentes.returnDate,
         contactPhone: contacts.phone,
         contactName: contacts.name,
-      }).from(pendentes).leftJoin(contacts, eq(pendentes.contactId, contacts.id))
+        priorityLevel: pendentes.priorityLevel,
+        vendedorName: users.name,
+      }).from(pendentes)
+        .leftJoin(contacts, eq(pendentes.contactId, contacts.id))
+        .leftJoin(users, eq(pendentes.vendedorId, users.id))
         .where(and(...alertParts))
-        .orderBy(asc(pendentes.returnDate))
+        .orderBy(desc(pendentes.priorityLevel), asc(pendentes.returnDate))
         .limit(12);
 
       const pendenteAlerts = await alertQuery;
@@ -1245,6 +1363,7 @@ Regras:
         totalContacts: 0,
         salesPipeline,
         pendenteAlerts,
+        dialerQueueEligibleCount,
         rankingPosition,
       };
     }),
@@ -1311,41 +1430,45 @@ Regras:
       const db = await getDb();
       if (!db) return null;
       const user = ctx.user as any;
-      if (user?.crmRole !== "vendedor") throw new Error("Apenas vendedores");
+      if (!canUseDialer(user)) {
+        throw new Error("Discador disponível para vendedores e chefes de equipa.");
+      }
 
-      // 1) Prioritize due pendentes (returnDate <= now)
+      // 1) Vendedores: priorizar pendentes próprios em atraso
       const now = new Date();
       const pT = whereContactsForUser(user);
-      const dueWhere: SQL[] = [
-        eq(pendentes.vendedorId, user.id),
-        eq(pendentes.status, "agendado"),
-        sql`${pendentes.returnDate} <= ${now}`,
-      ];
-      if (pT) dueWhere.push(pT);
+      if (user?.crmRole === "vendedor") {
+        const dueWhere: SQL[] = [
+          eq(pendentes.vendedorId, user.id),
+          eq(pendentes.status, "agendado"),
+          sql`${pendentes.returnDate} <= ${now}`,
+        ];
+        if (pT) dueWhere.push(pT);
 
-      const due = await db
-        .select({ pendente: pendentes })
-        .from(pendentes)
-        .innerJoin(contacts, eq(pendentes.contactId, contacts.id))
-        .where(and(...dueWhere))
-        .orderBy(desc(pendentes.returnDate))
-        .limit(1);
+        const due = await db
+          .select({ pendente: pendentes })
+          .from(pendentes)
+          .innerJoin(contacts, eq(pendentes.contactId, contacts.id))
+          .where(and(...dueWhere))
+          .orderBy(desc(pendentes.priorityLevel), desc(pendentes.returnDate))
+          .limit(1);
 
-      const dueRow = due[0]?.pendente;
-      if (dueRow) {
-        const contact = await db.select().from(contacts).where(eq(contacts.id, dueRow.contactId)).limit(1);
-        if (contact[0]) {
-          await db.update(users).set({
-            dialerState: "ready",
-            dialerContactId: contact[0].id,
-            dialerSource: "pendente",
-            dialerUpdatedAt: new Date(),
-          } as any).where(eq(users.id, user.id));
-          return { source: "pendente", pendente: dueRow, contact: contact[0] };
+        const dueRow = due[0]?.pendente;
+        if (dueRow) {
+          const contact = await db.select().from(contacts).where(eq(contacts.id, dueRow.contactId)).limit(1);
+          if (contact[0]) {
+            await db.update(users).set({
+              dialerState: "ready",
+              dialerContactId: contact[0].id,
+              dialerSource: "pendente",
+              dialerUpdatedAt: new Date(),
+            } as any).where(eq(users.id, user.id));
+            return { source: "pendente", pendente: dueRow, contact: contact[0] };
+          }
         }
       }
 
-      // 2) Else: use distribution.getNext logic (reuse here)
+      // 2) Fila aleatória (novo + cooldown 30 dias)
       const thirtyDaysAgo = new Date();
       thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
       const dq: SQL[] = [
@@ -1395,7 +1518,9 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
-        if (user?.crmRole !== "vendedor") throw new Error("Apenas vendedores");
+        if (!canUseDialer(user)) {
+          throw new Error("Discador disponível para vendedores e chefes de equipa.");
+        }
 
         await assertContactAccessible(db, input.contactId, user);
 
@@ -1433,6 +1558,7 @@ Regras:
               notes: input.pendenteNotes || input.notes || null,
               offerDesired: null,
               status: "agendado",
+              priorityLevel: 3,
             } as any);
             await db.update(contacts).set({
               status: "pendente",
@@ -1831,22 +1957,29 @@ Regras:
       const ua = getClientUserAgent(ctx.req as any);
 
       const [before] = await db
-        .select({ isOnline: users.isOnline, lastSeenIp: users.lastSeenIp })
+        .select({
+          isOnline: users.isOnline,
+          lastSeenIp: users.lastSeenIp,
+          presenceSessionStartedAt: users.presenceSessionStartedAt,
+        })
         .from(users)
         .where(eq(users.id, user.id))
         .limit(1);
       const wasOffline = before ? !before.isOnline : true;
       const ipChanged = (before?.lastSeenIp ?? "") !== (ip || "");
+      /** Inicia/repor marcador de sessão se estava offline ou ainda não havia início guardado. */
+      const startSessionClock =
+        wasOffline || !(before as { presenceSessionStartedAt?: Date | null })?.presenceSessionStartedAt;
 
       await db
         .update(users)
         .set({
           isOnline: true,
           lastOnlineAt: new Date(),
-          pauseStartedAt: null,
+          ...(wasOffline ? { pauseStartedAt: null } : {}),
           lastSeenIp: ip || null,
           lastSeenUserAgent: ua || null,
-          ...(wasOffline ? { presenceSessionStartedAt: new Date() } : {}),
+          ...(startSessionClock ? { presenceSessionStartedAt: new Date() } : {}),
         } as any)
         .where(eq(users.id, user.id));
 

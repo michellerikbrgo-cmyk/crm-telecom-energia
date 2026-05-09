@@ -1,5 +1,5 @@
 import { useAuth } from "@/_core/hooks/useAuth";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,11 +21,13 @@ import {
 } from "@/components/ui/sidebar";
 // import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { SessionBar } from "@/components/SessionBar";
+import { UserProfileDialog } from "@/components/UserProfileDialog";
+import { trpc } from "@/lib/trpc";
 import { Button } from "./ui/button";
 
 type MenuItem = {
@@ -37,7 +39,7 @@ type MenuItem = {
 
 const menuItems: MenuItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", path: "/", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: PhoneCall, label: "Discador", path: "/discador", roles: ["vendedor"] },
+  { icon: PhoneCall, label: "Discador", path: "/discador", roles: ["vendedor", "cej", "ce"] },
   { icon: Phone, label: "Contactos", path: "/contactos", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: FileText, label: "Contratos", path: "/contratos", roles: ["vendedor", "cej", "ce", "coordenador"] },
@@ -130,6 +132,8 @@ function DashboardLayoutContent({
   setSidebarWidth,
 }: DashboardLayoutContentProps) {
   const { user, logout } = useAuth();
+  const utils = trpc.useUtils();
+  const [profileOpen, setProfileOpen] = useState(false);
   const [location, setLocation] = useLocation();
   const { state, toggleSidebar } = useSidebar();
   const isCollapsed = state === "collapsed";
@@ -146,9 +150,14 @@ function DashboardLayoutContent({
   const activeMenuItem = filteredMenuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
 
-  const profile = user as { name?: string | null; email?: string | null } | null | undefined;
+  const profile = user as {
+    name?: string | null;
+    email?: string | null;
+    avatarUrl?: string | null;
+  } | null | undefined;
   const displayName = typeof profile?.name === "string" ? profile.name : "";
   const displayEmail = typeof profile?.email === "string" ? profile.email : "";
+  const avatarUrl = profile?.avatarUrl || null;
 
   useEffect(() => {
     if (isCollapsed) {
@@ -241,6 +250,9 @@ function DashboardLayoutContent({
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-3 rounded-lg px-1 py-1 hover:bg-accent/50 transition-colors w-full text-left group-data-[collapsible=icon]:justify-center focus:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <Avatar className="h-9 w-9 border shrink-0">
+                    {avatarUrl ? (
+                      <AvatarImage src={avatarUrl} alt="" className="object-cover" />
+                    ) : null}
                     <AvatarFallback className="text-xs font-medium">
                       {displayName.charAt(0).toUpperCase()}
                     </AvatarFallback>
@@ -255,7 +267,11 @@ function DashboardLayoutContent({
                   </div>
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuContent align="end" className="w-52">
+                <DropdownMenuItem className="cursor-pointer" onClick={() => setProfileOpen(true)}>
+                  <User className="mr-2 h-4 w-4" />
+                  <span>Foto de perfil</span>
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   onClick={logout}
                   className="cursor-pointer text-destructive focus:text-destructive"
@@ -276,6 +292,14 @@ function DashboardLayoutContent({
           style={{ zIndex: 50 }}
         />
       </div>
+
+      <UserProfileDialog
+        open={profileOpen}
+        onOpenChange={setProfileOpen}
+        displayName={displayName}
+        avatarUrl={avatarUrl}
+        onAvatarUpdated={() => void utils.auth.me.invalidate()}
+      />
 
       <SidebarInset>
         {isMobile && (
