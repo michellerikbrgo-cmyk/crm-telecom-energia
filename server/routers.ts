@@ -24,6 +24,7 @@ import {
   energyConfig,
   users,
   teams,
+  featureSuggestions,
 } from "../drizzle/schema";
 import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, type SQL } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
@@ -145,6 +146,25 @@ async function blacklistTeamScopeForInsert(
 }
 
 const INSTALL_CAL_TITLE_PREFIX = "Instalação #";
+
+function canReviewBetaSuggestions(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
+}
+
+function assertSuggestionReviewableByUser(
+  row: { tenantId?: number | null },
+  user: { id?: number; tenantId?: number | null; crmRole?: string; isSuperAdmin?: boolean },
+) {
+  if (isSuperAdminUser(user)) return;
+  if (user?.crmRole === "coordenador") {
+    if (row.tenantId == null || Number(row.tenantId) !== Number(user.tenantId)) {
+      throw new Error("Esta sugestão não pertence à sua empresa.");
+    }
+    return;
+  }
+  throw new Error("Sem permissão.");
+}
 
 async function syncSaleInstallationCalendar(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
@@ -2024,6 +2044,179 @@ Regras:
         }
 
         await db.delete(blacklist).where(eq(blacklist.id, input.id));
+        return { success: true };
+      }),
+  }),
+
+  // ============ BETA — sugestões de funcionalidades ============
+  beta: router({
+    submit: protectedProcedure
+      .input(
+        z.object({
+          title: z.string().min(3).max(255),
+          body: z.string().min(10).max(8000),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const tenantId = user.tenantId != null ? Number(user.tenantId) : null;
+        if (!isSuperAdminUser(user) && tenantId == null) {
+          throw new Error("Conta sem empresa associada; não é possível enviar sugestões.");
+        }
+        await db.insert(featureSuggestions).values({
+          tenantId,
+          authorId: user.id,
+          title: input.title.trim(),
+          body: input.body.trim(),
+          status: "pending",
+        } as any);
+        await db.insert(auditLogs).values({
+          userId: user.id,
+          action: "beta_suggestion_submit",
+          entity: "featureSuggestion",
+          details: input.title.trim().slice(0, 200),
+        });
+        return { success: true };
+      }),
+
+    listMine: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      return await db
+        .select({
+          id: featureSuggestions.id,
+          title: featureSuggestions.title,
+          body: featureSuggestions.body,
+          status: featureSuggestions.status,
+          createdAt: featureSuggestions.createdAt,
+          reviewedAt: featureSuggestions.reviewedAt,
+          reviewNote: featureSuggestions.reviewNote,
+        })
+        .from(featureSuggestions)
+        .where(eq(featureSuggestions.authorId, user.id))
+        .orderBy(desc(featureSuggestions.createdAt))
+        .limit(100);
+    }),
+
+    listPending: protectedProcedure.query(async ({ ctx }) => {
+      if (!canReviewBetaSuggestions(ctx.user)) return [];
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      const parts: SQL[] = [eq(featureSuggestions.status, "pending")];
+      if (!isSuperAdminUser(user)) {
+        if (user.tenantId == null) return [];
+        parts.push(eq(featureSuggestions.tenantId, user.tenantId));
+      }
+      const rows = await db
+        .select({
+          id: featureSuggestions.id,
+          tenantId: featureSuggestions.tenantId,
+          title: featureSuggestions.title,
+          body: featureSuggestions.body,
+          authorId: featureSuggestions.authorId,
+          authorName: users.name,
+          createdAt: featureSuggestions.createdAt,
+        })
+        .from(featureSuggestions)
+        .leftJoin(users, eq(featureSuggestions.authorId, users.id))
+        .where(and(...parts))
+        .orderBy(desc(featureSuggestions.createdAt))
+        .limit(200);
+      return rows;
+    }),
+
+    listAccepted: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      const parts: SQL[] = [eq(featureSuggestions.status, "accepted")];
+      if (!isSuperAdminUser(user)) {
+        if (user.tenantId == null) return [];
+        parts.push(eq(featureSuggestions.tenantId, user.tenantId));
+      }
+      const rows = await db
+        .select({
+          id: featureSuggestions.id,
+          tenantId: featureSuggestions.tenantId,
+          title: featureSuggestions.title,
+          body: featureSuggestions.body,
+          createdAt: featureSuggestions.createdAt,
+          reviewedAt: featureSuggestions.reviewedAt,
+          authorName: users.name,
+        })
+        .from(featureSuggestions)
+        .leftJoin(users, eq(featureSuggestions.authorId, users.id))
+        .where(and(...parts))
+        .orderBy(desc(featureSuggestions.reviewedAt), desc(featureSuggestions.createdAt))
+        .limit(500);
+
+      const tenantIds = Array.from(
+        new Set(rows.map((r) => r.tenantId).filter((x): x is number => x != null)),
+      );
+      let tenantLabels: Record<number, string> = {};
+      if (tenantIds.length) {
+        const tr = await db
+          .select({ id: users.id, name: users.name })
+          .from(users)
+          .where(inArray(users.id, tenantIds));
+        tenantLabels = Object.fromEntries(tr.map((t) => [t.id, t.name?.trim() || `Empresa #${t.id}`]));
+      }
+
+      return rows.map((r) => ({
+        id: r.id,
+        tenantId: r.tenantId,
+        tenantLabel:
+          r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
+        title: r.title,
+        body: r.body,
+        createdAt: r.createdAt,
+        acceptedAt: r.reviewedAt,
+        authorName: r.authorName,
+      }));
+    }),
+
+    review: protectedProcedure
+      .input(
+        z.object({
+          id: z.number(),
+          decision: z.enum(["accepted", "rejected"]),
+          reviewNote: z.string().max(2000).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (!canReviewBetaSuggestions(ctx.user)) {
+          throw new Error("Só Super Admin ou Coordenador podem rever sugestões.");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [row] = await db.select().from(featureSuggestions).where(eq(featureSuggestions.id, input.id)).limit(1);
+        if (!row) throw new Error("Sugestão não encontrada.");
+        if (row.status !== "pending") throw new Error("Esta sugestão já foi revista.");
+        assertSuggestionReviewableByUser(row as any, user);
+
+        await db
+          .update(featureSuggestions)
+          .set({
+            status: input.decision,
+            reviewedBy: user.id,
+            reviewedAt: new Date(),
+            reviewNote: input.reviewNote?.trim() || null,
+          } as any)
+          .where(eq(featureSuggestions.id, input.id));
+
+        await db.insert(auditLogs).values({
+          userId: user.id,
+          action: input.decision === "accepted" ? "beta_suggestion_accept" : "beta_suggestion_reject",
+          entity: "featureSuggestion",
+          entityId: input.id,
+          details: `${input.decision}: ${row.title}`.slice(0, 255),
+        });
+
         return { success: true };
       }),
   }),

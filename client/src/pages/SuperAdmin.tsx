@@ -1,3 +1,4 @@
+import { useAuth } from "@/_core/hooks/useAuth";
 import { RELEASE_LOG_RETENTION_DAYS } from "@shared/const";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -9,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, BookOpen, Hourglass, ScrollText } from "lucide-react";
+import { AlertTriangle, BookOpen, Hourglass, Rocket, ScrollText } from "lucide-react";
 import atualizacoesMd from "@shared/ATUALIZACOES.md?raw";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -115,9 +116,14 @@ function ReleaseLogRetentionCountdown({ atIso }: { atIso: string }) {
 }
 
 export default function SuperAdmin() {
+  const { user } = useAuth();
+  const isSuperOnly = !!(user as { isSuperAdmin?: boolean } | null)?.isSuperAdmin;
   const utils = trpc.useUtils();
   const settingsQuery = trpc.admin.getSettings.useQuery();
   const releaseLogQuery = trpc.admin.getReleaseLog.useQuery();
+  const betaAcceptedQuery = trpc.beta.listAccepted.useQuery(undefined, {
+    enabled: isSuperOnly,
+  });
   const updateMutation = trpc.admin.updateSettings.useMutation({
     onSuccess: async () => {
       toast.success("Configurações guardadas");
@@ -262,6 +268,50 @@ export default function SuperAdmin() {
             </ScrollArea>
           </CardContent>
         </Card>
+
+        {isSuperOnly ? (
+          <Card className="shadow-sm border border-border border-l-[4px] border-l-emerald-600/60">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Rocket className="h-5 w-5 text-emerald-600" aria-hidden />
+                Próxima versão — sugestões aceites (Beta)
+              </CardTitle>
+              <p className="text-sm text-muted-foreground font-normal">
+                Lista global de ideias já <strong>aceites</strong> pelos coordenadores ou por si. As mesmas entradas
+                aparecem filtradas por empresa na página <code className="text-xs">/beta</code>.
+              </p>
+            </CardHeader>
+            <CardContent>
+              {betaAcceptedQuery.isLoading ? (
+                <p className="text-sm text-muted-foreground">A carregar…</p>
+              ) : !betaAcceptedQuery.data?.length ? (
+                <p className="text-sm text-muted-foreground">Ainda não há sugestões aceites.</p>
+              ) : (
+                <ScrollArea className="h-[min(360px,50vh)] pr-4">
+                  <ul className="space-y-4 text-sm">
+                    {betaAcceptedQuery.data.map((s) => (
+                      <li key={s.id} className="border-b border-border/60 pb-4 last:border-0">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <span className="font-semibold text-foreground">{s.title}</span>
+                          <Badge variant="outline" className="text-[10px] font-normal">
+                            {s.tenantLabel}
+                          </Badge>
+                        </div>
+                        <p className="text-muted-foreground whitespace-pre-wrap text-xs leading-relaxed">{s.body}</p>
+                        <p className="text-[11px] text-muted-foreground mt-2">
+                          {s.authorName ?? "—"}
+                          {s.acceptedAt
+                            ? ` · Aceite em ${new Date(s.acceptedAt).toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" })}`
+                            : ""}
+                        </p>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
+              )}
+            </CardContent>
+          </Card>
+        ) : null}
 
         <Card className="shadow-sm border border-border border-l-[4px] border-l-muted-foreground/40">
           <CardHeader className="pb-2">

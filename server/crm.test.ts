@@ -72,6 +72,14 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("blacklist.remove");
   });
 
+  it("should have beta router for feature suggestions", () => {
+    expect(appRouter._def.procedures).toHaveProperty("beta.submit");
+    expect(appRouter._def.procedures).toHaveProperty("beta.listMine");
+    expect(appRouter._def.procedures).toHaveProperty("beta.listPending");
+    expect(appRouter._def.procedures).toHaveProperty("beta.listAccepted");
+    expect(appRouter._def.procedures).toHaveProperty("beta.review");
+  });
+
   it("should have gamification router with ranking", () => {
     expect(appRouter._def.procedures).toHaveProperty("gamification.ranking");
   });

@@ -246,6 +246,24 @@ export const auditLogs = mysqlTable("auditLogs", {
 
 export type AuditLog = typeof auditLogs.$inferSelect;
 
+// ============ FEATURE SUGGESTIONS (Beta / roadmap) ============
+export const featureSuggestions = mysqlTable("featureSuggestions", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Dono do tenant (coordenador user id); null = sugestão global (ex.: Super Admin). */
+  tenantId: int("tenantId"),
+  authorId: int("authorId").notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  body: text("body").notNull(),
+  status: mysqlEnum("status", ["pending", "accepted", "rejected"]).default("pending").notNull(),
+  reviewedBy: int("reviewedBy"),
+  reviewedAt: timestamp("reviewedAt"),
+  reviewNote: text("reviewNote"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type FeatureSuggestion = typeof featureSuggestions.$inferSelect;
+
 // ============ SALES ============
 export const sales = mysqlTable("sales", {
   id: int("id").autoincrement().primaryKey(),

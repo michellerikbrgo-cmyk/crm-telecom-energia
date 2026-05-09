@@ -100,6 +100,15 @@ Documento versionado no repositório (`shared/ATUALIZACOES.md`). Actualize este 
 
 - `0014` — alerta global (`userBroadcastAlert`) em `appSettings`.
 - `0015` — `blacklist.teamId` para isolamento por equipa.
+- `0016` — `featureSuggestions`: página **Beta** (`/beta`) para sugestões; Super Admin vê roadmap global de aceites.
+
+---
+
+## Beta — sugestões de funcionalidades
+
+- Qualquer utilizador autenticado pode enviar ideias em **`/beta`**.
+- **Coordenador** e **Super Admin** rever sugestões (aceitar / recusar) por empresa ou global.
+- Sugestões **aceites** aparecem na página Beta (filtradas por empresa) e na **Super Admin** como lista **«Próxima versão»** (visão global).
 
 ---
 
