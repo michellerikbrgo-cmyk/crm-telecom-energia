@@ -102,8 +102,10 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("energy.updateConfig");
   });
 
-  it("should have auth router with me and logout", () => {
+  it("should have auth router with me, logout, avatar mutations", () => {
     expect(appRouter._def.procedures).toHaveProperty("auth.me");
     expect(appRouter._def.procedures).toHaveProperty("auth.logout");
+    expect(appRouter._def.procedures).toHaveProperty("auth.uploadAvatar");
+    expect(appRouter._def.procedures).toHaveProperty("auth.removeAvatar");
   });
 });
