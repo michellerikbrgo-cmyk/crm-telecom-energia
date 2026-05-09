@@ -25,7 +25,7 @@
  * });
  * ```
  */
-import { getForgeRuntimeConfig } from "../forgeRuntime";
+import { getOpenAiApiKey } from "./openAiCredentials";
 
 export type TranscribeOptions = {
   audioUrl: string; // URL to the audio file (e.g., S3 URL)
@@ -74,15 +74,6 @@ export async function transcribeAudio(
   options: TranscribeOptions
 ): Promise<TranscriptionResponse | TranscriptionError> {
   try {
-    const forgeCfg = await getForgeRuntimeConfig();
-    if (!forgeCfg) {
-      return {
-        error: "Voice transcription service is not configured",
-        code: "SERVICE_ERROR",
-        details: "Forge API não configurada (env ou Super Admin)",
-      };
-    }
-
     // Step 2: Download audio from URL
     let audioBuffer: Buffer;
     let mimeType: string;
@@ -135,20 +126,20 @@ export async function transcribeAudio(
     );
     formData.append("prompt", prompt);
 
-    // Step 4: Call the transcription service
-    const baseUrl = forgeCfg.forgeUrl.endsWith("/")
-      ? forgeCfg.forgeUrl
-      : `${forgeCfg.forgeUrl}/`;
+    const openaiKey = await getOpenAiApiKey();
+    if (!openaiKey) {
+      return {
+        error: "Voice transcription service is not configured",
+        code: "SERVICE_ERROR",
+        details:
+          "Configure OPENAI_API_KEY ou a chave OpenAI na página Super Admin.",
+      };
+    }
 
-    const fullUrl = new URL(
-      "v1/audio/transcriptions",
-      baseUrl
-    ).toString();
-
-    const response = await fetch(fullUrl, {
+    const response = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${forgeCfg.forgeKey}`,
+        authorization: `Bearer ${openaiKey}`,
         "Accept-Encoding": "identity",
       },
       body: formData,

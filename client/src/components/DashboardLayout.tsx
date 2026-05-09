@@ -21,11 +21,12 @@ import {
 } from "@/components/ui/sidebar";
 // import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User, Ban, ClipboardList, Beaker } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { SessionBar } from "@/components/SessionBar";
+import { UserBroadcastBanner } from "@/components/UserBroadcastBanner";
 import { UserProfileDialog } from "@/components/UserProfileDialog";
 import { trpc } from "@/lib/trpc";
 import { Button } from "./ui/button";
@@ -38,9 +39,12 @@ type MenuItem = {
 };
 
 const menuItems: MenuItem[] = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: LayoutDashboard, label: "Dashboard", path: "/painel", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Beaker, label: "Beta", path: "/beta", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: PhoneCall, label: "Discador", path: "/discador", roles: ["vendedor", "cej", "ce"] },
+  { icon: ClipboardList, label: "Acompanhamento", path: "/acompanhamento", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Phone, label: "Contactos", path: "/contactos", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: Ban, label: "Lista negra", path: "/lista-negra", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: FileText, label: "Contratos", path: "/contratos", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Calculator, label: "Calculadora", path: "/calculadora", roles: ["vendedor", "cej", "ce", "coordenador"] },
@@ -318,6 +322,7 @@ function DashboardLayoutContent({
         )}
         <main className="flex-1 flex flex-col gap-4 p-4 min-h-0">
           <SessionBar />
+          <UserBroadcastBanner hideForSuperAdmin={isSuperAdmin} />
           <div className="flex-1 min-w-0 min-h-0">{children}</div>
         </main>
       </SidebarInset>

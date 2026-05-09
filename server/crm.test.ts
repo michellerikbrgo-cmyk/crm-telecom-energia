@@ -9,7 +9,7 @@ function createMockContext(crmRole: string = "vendedor"): TrpcContext {
       openId: "test-user",
       email: "test@example.com",
       name: "Test User",
-      loginMethod: "manus",
+      loginMethod: "email",
       role: "user",
       crmRole,
       createdAt: new Date(),
@@ -48,8 +48,9 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("campaigns.create");
   });
 
-  it("should have ai router with askObjection", () => {
+  it("should have ai router with askObjection and roleplayTurn", () => {
     expect(appRouter._def.procedures).toHaveProperty("ai.askObjection");
+    expect(appRouter._def.procedures).toHaveProperty("ai.roleplayTurn");
   });
 
   it("should have calls router with log", () => {
@@ -66,8 +67,17 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("distribution.repescagem");
   });
 
-  it("should have blacklist router with add", () => {
+  it("should have blacklist router with add and remove", () => {
     expect(appRouter._def.procedures).toHaveProperty("blacklist.add");
+    expect(appRouter._def.procedures).toHaveProperty("blacklist.remove");
+  });
+
+  it("should have beta router for feature suggestions", () => {
+    expect(appRouter._def.procedures).toHaveProperty("beta.submit");
+    expect(appRouter._def.procedures).toHaveProperty("beta.listMine");
+    expect(appRouter._def.procedures).toHaveProperty("beta.listPending");
+    expect(appRouter._def.procedures).toHaveProperty("beta.listAccepted");
+    expect(appRouter._def.procedures).toHaveProperty("beta.review");
   });
 
   it("should have gamification router with ranking", () => {
@@ -83,8 +93,9 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("scripts.create");
   });
 
-  it("should have sales router with list and create", () => {
+  it("should have sales router with list, pipeline and create", () => {
     expect(appRouter._def.procedures).toHaveProperty("sales.list");
+    expect(appRouter._def.procedures).toHaveProperty("sales.pipeline");
     expect(appRouter._def.procedures).toHaveProperty("sales.create");
   });
 
@@ -107,5 +118,18 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("auth.logout");
     expect(appRouter._def.procedures).toHaveProperty("auth.uploadAvatar");
     expect(appRouter._def.procedures).toHaveProperty("auth.removeAvatar");
+  });
+
+  it("should expose system.ping and blacklist.list", () => {
+    expect(appRouter._def.procedures).toHaveProperty("system.ping");
+    expect(appRouter._def.procedures).toHaveProperty("blacklist.list");
+  });
+
+  it("should have admin.getReleaseLog for Super Admin changelog", () => {
+    expect(appRouter._def.procedures).toHaveProperty("admin.getReleaseLog");
+  });
+
+  it("should have system.getUserBroadcastAlert", () => {
+    expect(appRouter._def.procedures).toHaveProperty("system.getUserBroadcastAlert");
   });
 });

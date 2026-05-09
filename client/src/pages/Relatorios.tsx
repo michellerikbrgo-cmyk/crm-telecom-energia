@@ -39,7 +39,9 @@ function SalePipelineRow({ sale }: { sale: any }) {
       toast.success("Venda actualizada");
       await utils.dashboard.stats.invalidate();
       await utils.sales.list.invalidate();
+      await utils.sales.pipeline.invalidate();
       await utils.gamification.ranking.invalidate();
+      await utils.calendar.list.invalidate();
     },
     onError: (e: any) => toast.error(e.message),
   });

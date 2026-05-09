@@ -28,7 +28,7 @@ export const users = mysqlTable("users", {
   lastSeenIp: varchar("lastSeenIp", { length: 45 }),
   lastSeenUserAgent: varchar("lastSeenUserAgent", { length: 512 }),
   lastSeenGeo: varchar("lastSeenGeo", { length: 255 }),
-  /** URL servida via `/manus-storage/...` após upload (Forge/S3). */
+  /** URL servida via `/manus-storage/...` após upload local. */
   avatarUrl: varchar("avatarUrl", { length: 512 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -54,9 +54,12 @@ export const appSettings = mysqlTable("appSettings", {
   whatsappPhoneNumberId: varchar("whatsappPhoneNumberId", { length: 64 }),
   whatsappBusinessAccountId: varchar("whatsappBusinessAccountId", { length: 64 }),
   whatsappVerifyTokenEnc: text("whatsappVerifyTokenEnc"),
-  /** Base URL Forge/Manus (ex.: https://forge.manus.im). Se vazio com chave, usa host por defeito. */
+  /** Legado (não usado pela app). */
   forgeApiUrl: varchar("forgeApiUrl", { length: 512 }),
   forgeApiKeyEnc: text("forgeApiKeyEnc"),
+  /** Mensagem global mostrada aos utilizadores (exc. Super Admin). Incrementa revisão ao guardar. */
+  userBroadcastAlert: text("userBroadcastAlert"),
+  userBroadcastAlertRevision: int("userBroadcastAlertRevision").default(0).notNull(),
   // audit
   updatedBy: int("updatedBy"),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -243,6 +246,24 @@ export const auditLogs = mysqlTable("auditLogs", {
 
 export type AuditLog = typeof auditLogs.$inferSelect;
 
+// ============ FEATURE SUGGESTIONS (Beta / roadmap) ============
+export const featureSuggestions = mysqlTable("featureSuggestions", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Dono do tenant (coordenador user id); null = sugestão global (ex.: Super Admin). */
+  tenantId: int("tenantId"),
+  authorId: int("authorId").notNull(),
+  title: varchar("title", { length: 255 }).notNull(),
+  body: text("body").notNull(),
+  status: mysqlEnum("status", ["pending", "accepted", "rejected"]).default("pending").notNull(),
+  reviewedBy: int("reviewedBy"),
+  reviewedAt: timestamp("reviewedAt"),
+  reviewNote: text("reviewNote"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type FeatureSuggestion = typeof featureSuggestions.$inferSelect;
+
 // ============ SALES ============
 export const sales = mysqlTable("sales", {
   id: int("id").autoincrement().primaryKey(),
@@ -268,6 +289,8 @@ export const blacklist = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     tenantId: int("tenantId"),
+    /** Equipa do chefe (mesmo teamId que users.teamId); null = linha antiga ou coordenador. */
+    teamId: int("teamId"),
     phone: varchar("phone", { length: 20 }).notNull(),
     reason: text("reason"),
     addedBy: int("addedBy").notNull(),

@@ -22,6 +22,9 @@ const GestaoUtilizadores = lazy(() => import("@/pages/GestaoUtilizadores"));
 const SuperAdmin = lazy(() => import("@/pages/SuperAdmin"));
 const Discador = lazy(() => import("@/pages/Discador"));
 const Supervisao = lazy(() => import("@/pages/Supervisao"));
+const ListaNegra = lazy(() => import("@/pages/ListaNegra"));
+const Acompanhamento = lazy(() => import("@/pages/Acompanhamento"));
+const Beta = lazy(() => import("@/pages/Beta"));
 
 /** Carregado só nas rotas autenticadas — não entra no chunk do /login */
 export default function AuthenticatedApp() {
@@ -30,7 +33,9 @@ export default function AuthenticatedApp() {
       <DashboardLayout>
         <Suspense fallback={<PageLoadFallback />}>
           <Switch>
-            <Route path="/" component={Home} />
+            <Route path="/painel" component={Home} />
+            <Route path="/beta" component={Beta} />
+            <Route path="/acompanhamento" component={Acompanhamento} />
             <Route path="/contactos" component={Contactos} />
             <Route path="/pendentes" component={Pendentes} />
             <Route path="/contratos" component={Contratos} />
@@ -47,6 +52,7 @@ export default function AuthenticatedApp() {
             <Route path="/super-admin" component={SuperAdmin} />
             <Route path="/discador" component={Discador} />
             <Route path="/supervisao" component={Supervisao} />
+            <Route path="/lista-negra" component={ListaNegra} />
             <Route path="/404" component={NotFound} />
             <Route component={NotFound} />
           </Switch>

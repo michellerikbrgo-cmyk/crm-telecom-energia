@@ -1,0 +1,70 @@
+{
+  "entries": [
+    {
+      "at": "2026-05-09T18:45:00.000Z",
+      "title": "9 Mai 2026, 19:45 (Lisboa) — Operação e base de dados",
+      "bullets": [
+        "Pendentes: coluna priorityLevel — migração drizzle 0013 (pnpm exec drizzle-kit migrate).",
+        "Fluxo recomendado: pnpm run deploy:pm2 (build + registo no log + pm2 restart crm).",
+        "Backups: pasta backups/ com tar.gz do código opcionalmente acompanhados de SQL."
+      ]
+    },
+    {
+      "at": "2026-05-09T16:25:00.000Z",
+      "title": "9 Mai 2026, 17:25 (Lisboa) — Experiência de entrada e tema",
+      "bullets": [
+        "Página inicial em /: barra de progresso 0–100% com mensagem «Grandes conquistas começam com uma ligação. Já falta pouco.» → redirecciona para /login; sessão activa vai para /painel.",
+        "Dashboard principal passou de / para /painel.",
+        "Login redesenhado (layout telecom); tema global (primária vermelho) alinhado ao login.",
+        "Log de actualização inicial na Super Admin (passou a ser preenchido automaticamente em cada deploy)."
+      ]
+    },
+    {
+      "at": "2026-05-09T14:05:00.000Z",
+      "title": "9 Mai 2026, 15:05 (Lisboa) — IA e integrações",
+      "bullets": [
+        "Chat e simulador de objeções (invokeLLM): OpenAI e Google Gemini conforme fornecedor preferido e chaves na Super Admin ou env (OPENAI_API_KEY formato sk-, GEMINI_API_KEY formato AIza…).",
+        "Transcrição de voz (Whisper) apenas com chave OpenAI válida.",
+        "Google Maps no servidor: GOOGLE_MAPS_API_KEY; no cliente: VITE_GOOGLE_MAPS_API_KEY para o script do mapa.",
+        "Secção Forge retirada da Super Admin."
+      ]
+    },
+    {
+      "at": "2026-05-09T10:40:00.000Z",
+      "title": "9 Mai 2026, 11:40 (Lisboa) — Independência da plataforma externa",
+      "bullets": [
+        "Removidas dependências Manus / Forge e OAuth externo; autenticação com e-mail + senha e cookie JWT (JWT_SECRET).",
+        "Armazenamento de ficheiros apenas em disco com LOCAL_UPLOAD_ROOT; servidos em /manus-storage — sem presign remoto.",
+        "Removidos plugins Vite Manus, collector de debug e clientes OAuth ligados ao servidor anterior.",
+        "Eliminados módulos só Manus: notifyOwner remoto, Data API Forge, geração de imagens Forge; axios retirado onde deixou de ser necessário.",
+        "API HTTP mínima GET /api/v1/ping (além de /api/health e tRPC em /api/trpc)."
+      ]
+    },
+    {
+      "at": "2026-05-08T15:45:00.000Z",
+      "title": "8 Mai 2026, 16:45 (Lisboa) — Rotas cliente, QA e segurança de sessão",
+      "bullets": [
+        "Revisão de rotas CRM (painel, login, página de lista negra) e comportamento quando a sessão expira.",
+        "Ajustes de layout no dashboard para encaixe com multitenant / perfil utilizador.",
+        "Corridos testes rápidos (Vitest nos routers CRM e logout)."
+      ]
+    },
+    {
+      "at": "2026-05-08T13:15:00.000Z",
+      "title": "8 Mai 2026, 14:15 (Lisboa) — Fluxo inicial e marcação de caminhos públicos vs autenticados",
+      "bullets": [
+        "Definição do splash inicial com redireccionamento inteligente (visitante → login; com cookie → painel).",
+        "Separação clara de rotas públicas e área autenticada no cliente."
+      ]
+    },
+    {
+      "at": "2026-05-08T08:30:00.000Z",
+      "title": "8 Mai 2026, 09:30 (Lisboa) — Preparação de operações e blacklist",
+      "bullets": [
+        "Lista negra: página administrativa para consulta das entradas existentes ligadas ao servidor.",
+        "Notas sobre cópias de segurança de código/db antes das alterações de maior alcance.",
+        "Revisão de variáveis de ambiente obrigatórias para o modo produção minimal."
+      ]
+    }
+  ]
+}

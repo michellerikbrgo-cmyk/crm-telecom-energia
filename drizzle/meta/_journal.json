@@ -99,6 +99,27 @@
       "when": 1778250005000,
       "tag": "0013_pendentes_priority",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1778250006000,
+      "tag": "0014_user_broadcast_alert",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "5",
+      "when": 1778250007000,
+      "tag": "0015_blacklist_team",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "5",
+      "when": 1778250008000,
+      "tag": "0016_feature_suggestions",
+      "breakpoints": true
     }
   ]
 }
