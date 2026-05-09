@@ -12,6 +12,7 @@ CREATE TABLE `featureSuggestions` (
   `updatedAt` timestamp NOT NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT `featureSuggestions_id` PRIMARY KEY(`id`)
 );
-
+--> statement-breakpoint
 CREATE INDEX `featureSuggestions_tenant_status` ON `featureSuggestions` (`tenantId`, `status`);
+--> statement-breakpoint
 CREATE INDEX `featureSuggestions_status` ON `featureSuggestions` (`status`);

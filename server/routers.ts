@@ -40,10 +40,16 @@ import {
   whereInTenantUserIds,
 } from "./tenantScope";
 import { storagePut } from "./storage";
-import { decryptText, encryptText, maskSecret } from "./_core/cryptoSecrets";
+import {
+  decryptText,
+  encryptText,
+  looksLikeMaskedSecret,
+  maskSecret,
+} from "./_core/cryptoSecrets";
 import {
   getClientIp,
   getClientUserAgent,
+  isPrivateOrLocalIp,
   lookupGeoLabel,
   summarizeUserAgent,
 } from "./_core/clientMeta";
@@ -82,6 +88,48 @@ function canManageSalesLifecycle(user: unknown): boolean {
 function canManageTeamsTable(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
   return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
+}
+
+/** Meta de ligações: qualquer papel acima de vendedor (CEJ, CE, coordenador, Super Admin). */
+function canSetDailyCallsGoal(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(
+    u?.isSuperAdmin ||
+    ["cej", "ce", "coordenador"].includes(u?.crmRole || "")
+  );
+}
+
+const DEFAULT_DAILY_CALLS_GOAL = 80;
+
+async function resolveDailyCallsGoalForUser(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  user: Record<string, unknown> | null | undefined,
+): Promise<number> {
+  if (!user?.id) return DEFAULT_DAILY_CALLS_GOAL;
+  const u = user as {
+    id: number;
+    teamId?: number | null;
+    crmRole?: string;
+  };
+  let teamId: number | null = null;
+  if (u.crmRole === "vendedor") {
+    teamId = u.teamId ?? null;
+  } else {
+    const scope = await resolveUserTeamScopeId(db, {
+      id: u.id,
+      teamId: u.teamId ?? null,
+      crmRole: u.crmRole,
+    });
+    teamId = scope ?? (u.crmRole === "coordenador" ? (u.teamId ?? null) : null);
+  }
+  if (teamId == null) return DEFAULT_DAILY_CALLS_GOAL;
+  const [row] = await db
+    .select({ g: teams.dailyCallsGoal })
+    .from(teams)
+    .where(eq(teams.id, teamId))
+    .limit(1);
+  const g = row?.g;
+  return typeof g === "number" && g > 0 ? g : DEFAULT_DAILY_CALLS_GOAL;
 }
 
 /** Resolve equipa só deste contexto (sem tenant isolado por domínio; um CRM, várias equipas por teamId). */
@@ -1254,6 +1302,7 @@ Regras:
           if (value === undefined) return;
           const trimmed = value.trim();
           if (!trimmed) return; // keep existing if empty
+          if (looksLikeMaskedSecret(trimmed)) return; // UI mask — não substituir chave real
           update[field] = encryptText(trimmed);
         };
 
@@ -1448,6 +1497,7 @@ Regras:
           overduePendenteCount: 0,
           salesMonth: 0,
           totalContacts: 0,
+          dailyCallsGoal: DEFAULT_DAILY_CALLS_GOAL,
           salesPipeline: { aguarda_instalacao: 0, em_aberto: 0, activo: 0, e_switch: 0, cancelado: 0 },
           pendenteAlerts: [] as Array<{
             id: number;
@@ -1609,12 +1659,15 @@ Regras:
       const idx = sorted.findIndex(r => r.vendedorId === user?.id);
       if (idx >= 0) rankingPosition = idx + 1;
 
+      const dailyCallsGoal = await resolveDailyCallsGoalForUser(db, user);
+
       return {
         callsToday: callsResult[0]?.count || 0,
         pendentesToday: pendentesResult[0]?.count || 0,
         overduePendenteCount: overdueResult[0]?.count || 0,
         salesMonth: salesResult[0]?.count || 0,
         totalContacts: 0,
+        dailyCallsGoal,
         salesPipeline,
         pendenteAlerts,
         dialerQueueEligibleCount,
@@ -1843,8 +1896,7 @@ Regras:
 
       if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) return [];
 
-      // Coordenador: visão global. CE / CEJ: só membros da mesma equipa (teamId ou, para CE, via teams.leaderId).
-      let q = db.select({
+      const selectSupervisionUsers = {
         id: users.id,
         name: users.name,
         email: users.email,
@@ -1859,8 +1911,26 @@ Regras:
         lastSeenIp: users.lastSeenIp,
         lastSeenUserAgent: users.lastSeenUserAgent,
         lastSeenGeo: users.lastSeenGeo,
-      }).from(users);
+      };
 
+      const mapDevice = (r: Record<string, unknown>) => ({
+        ...r,
+        deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
+      });
+
+      /** Super Admin (mesmo sem crmRole coordenador) vê todos os utilizadores com filtro tenant «ALL». */
+      if (isSuperAdminUser(user)) {
+        let q = db.select(selectSupervisionUsers).from(users);
+        const uw = whereUsersForUser(user as any);
+        const parts: SQL[] = [];
+        if (uw) parts.push(uw);
+        if (parts.length) q = (q as any).where(and(...parts));
+        const rows = await (q as any);
+        return rows.map(mapDevice);
+      }
+
+      // Coordenador: visão global no tenant. CE / CEJ: só membros da mesma equipa.
+      let q = db.select(selectSupervisionUsers).from(users);
       const uw = whereUsersForUser(user as any);
       const parts: SQL[] = [];
       if (uw) parts.push(uw);
@@ -1868,10 +1938,7 @@ Regras:
       if (user?.crmRole === "coordenador") {
         if (parts.length) q = (q as any).where(and(...parts));
         const rows = await (q as any);
-        return rows.map((r: Record<string, unknown>) => ({
-          ...r,
-          deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
-        }));
+        return rows.map(mapDevice);
       }
 
       const scopeId = await resolveUserTeamScopeId(db, {
@@ -1886,17 +1953,14 @@ Regras:
       q = (q as any).where(and(...parts));
 
       const rows = await (q as any);
-      return rows.map((r: Record<string, unknown>) => ({
-        ...r,
-        deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
-      }));
+      return rows.map(mapDevice);
     }),
 
     alerts: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
       const user = ctx.user as any;
-      if (!["cej", "ce", "coordenador"].includes(user?.crmRole)) return [];
+      if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) return [];
 
       const now = new Date();
       const overdue: SQL[] = [
@@ -2270,11 +2334,18 @@ Regras:
     }),
   }),
 
-  // ============ AUDIT ============
+  // ============ AUDIT (só leitura — nunca UPDATE/DELETE na app; linhas intocáveis) ============
   audit: router({
     list: protectedProcedure
       .input(z.object({ limit: z.number().default(50) }).optional())
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        const user = ctx.user as any;
+        if (
+          !["ce", "coordenador"].includes(user?.crmRole ?? "") &&
+          !isSuperAdminUser(user)
+        ) {
+          throw new Error("Sem permissão para consultar a auditoria.");
+        }
         const db = await getDb();
         if (!db) return [];
         const rows = await db
@@ -2555,6 +2626,7 @@ Regras:
         .select({
           isOnline: users.isOnline,
           lastSeenIp: users.lastSeenIp,
+          lastSeenGeo: users.lastSeenGeo,
           presenceSessionStartedAt: users.presenceSessionStartedAt,
         })
         .from(users)
@@ -2578,7 +2650,19 @@ Regras:
         } as any)
         .where(eq(users.id, user.id));
 
-      if (ip && (wasOffline || ipChanged)) {
+      /**
+       * Geolocalização: antes só corria se IP mudava ou reaparecia offline — mas o contexto tRPC
+       * já marca `isOnline` em cada pedido, logo `wasOffline` era quase sempre false e `lastSeenGeo`
+       * ficava vazio. Actualizar quando: sem geo, mudou IP, estava offline, ou IP local/privado (rótulo fixo).
+       */
+      const needsGeoRefresh =
+        !!ip &&
+        (!before?.lastSeenGeo ||
+          wasOffline ||
+          ipChanged ||
+          isPrivateOrLocalIp(ip));
+
+      if (needsGeoRefresh) {
         void lookupGeoLabel(ip).then((geo) => {
           if (!geo) return;
           void db.update(users).set({ lastSeenGeo: geo } as any).where(eq(users.id, user.id));
@@ -2705,6 +2789,35 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+
+        /** Modelo global (tarifário por defeito) — só Super Admin altera directamente. */
+        if (isSuperAdminUser(user)) {
+          const globalRows = await db
+            .select()
+            .from(energyConfig)
+            .where(sql`${energyConfig.tenantCoordinatorUserId} IS NULL`)
+            .limit(1);
+          if (globalRows[0]) {
+            await db
+              .update(energyConfig)
+              .set({ ...input, updatedBy: user?.id })
+              .where(eq(energyConfig.id, globalRows[0].id));
+          } else {
+            await db.insert(energyConfig).values({
+              tenantCoordinatorUserId: null,
+              priceKwhSimples: input.priceKwhSimples,
+              priceKwhBiHorariaPonta: input.priceKwhBiHorariaPonta,
+              priceKwhBiHorariaVazio: input.priceKwhBiHorariaVazio,
+              baseDiscountPercent: input.baseDiscountPercent,
+              vdfClientExtraPercent: input.vdfClientExtraPercent,
+              vdfGasClientExtraPercent: input.vdfGasClientExtraPercent,
+              reembolsoPercent: input.reembolsoPercent,
+              updatedBy: user?.id,
+            } as any);
+          }
+          return { success: true };
+        }
+
         if (user?.crmRole !== "coordenador") throw new Error("Apenas o Coordenador pode alterar a configuração");
 
         const tid = user.tenantId;
@@ -2854,6 +2967,57 @@ Regras:
         assertEntityTenant(tm as any, user, "Equipa");
 
         await db.update(teams).set({ contactEmail: emailVal }).where(eq(teams.id, input.teamId));
+        return { success: true as const };
+      }),
+
+    updateDailyCallsGoal: protectedProcedure
+      .input(
+        z.object({
+          teamId: z.number().int(),
+          dailyCallsGoal: z.number().int().min(1).max(999),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (!canSetDailyCallsGoal(user)) {
+          throw new Error(
+            "Apenas Chefes de Equipa, Chefes Jr., Coordenadores ou Super Admin podem definir a meta de ligações.",
+          );
+        }
+
+        const [tm] = await db.select().from(teams).where(eq(teams.id, input.teamId)).limit(1);
+        if (!tm) throw new Error("Equipa não encontrada");
+
+        if (canManageTeamsTable(user)) {
+          assertEntityTenant(tm as any, user, "Equipa");
+          await db
+            .update(teams)
+            .set({ dailyCallsGoal: input.dailyCallsGoal })
+            .where(eq(teams.id, input.teamId));
+          return { success: true as const };
+        }
+
+        if (!["ce", "cej"].includes(user?.crmRole ?? "")) {
+          throw new Error("Sem permissão para alterar esta equipa.");
+        }
+
+        const scopeId = await resolveUserTeamScopeId(db, {
+          id: user.id,
+          teamId: user.teamId ?? null,
+          crmRole: user.crmRole,
+        });
+
+        if (scopeId !== input.teamId) {
+          throw new Error("Só pode definir a meta da própria equipa.");
+        }
+        assertEntityTenant(tm as any, user, "Equipa");
+
+        await db
+          .update(teams)
+          .set({ dailyCallsGoal: input.dailyCallsGoal })
+          .where(eq(teams.id, input.teamId));
         return { success: true as const };
       }),
   }),

@@ -76,6 +76,8 @@ export const teams = mysqlTable("teams", {
   contactEmail: varchar("contactEmail", { length: 320 }),
   /** Dono do tenant (coordenador user id) para isolar equipas por empresa. */
   tenantId: int("tenantId"),
+  /** Meta diária de chamadas para a equipa (dashboard); null = usar valor por defeito da app (80). */
+  dailyCallsGoal: int("dailyCallsGoal"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 

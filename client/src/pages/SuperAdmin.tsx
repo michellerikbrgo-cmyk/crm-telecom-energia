@@ -10,7 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle, BookOpen, Hourglass, Rocket, ScrollText } from "lucide-react";
+import { AlertTriangle, BookOpen, Hourglass, Info, Rocket, ScrollText } from "lucide-react";
 import atualizacoesMd from "@shared/ATUALIZACOES.md?raw";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
@@ -115,6 +115,8 @@ function ReleaseLogRetentionCountdown({ atIso }: { atIso: string }) {
   );
 }
 
+type AiProvider = "openai" | "gemini" | "deepseek" | "claude";
+
 export default function SuperAdmin() {
   const { user } = useAuth();
   const isSuperOnly = !!(user as { isSuperAdmin?: boolean } | null)?.isSuperAdmin;
@@ -140,7 +142,7 @@ export default function SuperAdmin() {
 
   const [form, setForm] = useState({
     aiEnabled: true,
-    preferredAiProvider: "openai",
+    preferredAiProvider: "openai" as AiProvider,
     openaiApiKey: "",
     geminiApiKey: "",
     deepseekApiKey: "",
@@ -162,7 +164,7 @@ export default function SuperAdmin() {
     setBroadcastDraft(d.userBroadcastAlert ?? "");
     setForm({
       aiEnabled: d.aiEnabled,
-      preferredAiProvider: d.preferredAiProvider as typeof form.preferredAiProvider,
+      preferredAiProvider: d.preferredAiProvider as AiProvider,
       openaiApiKey: d.openaiApiKey ?? "",
       geminiApiKey: d.geminiApiKey ?? "",
       deepseekApiKey: d.deepseekApiKey ?? "",
@@ -183,6 +185,62 @@ export default function SuperAdmin() {
             IA, armazenamento local, WhatsApp e zona de perigo
           </p>
         </div>
+
+        <Card className="border-0 shadow-sm border-l-4 border-l-amber-600/70 bg-amber-500/[0.07] dark:bg-amber-950/25">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <Info className="h-5 w-5 text-amber-800 dark:text-amber-400 shrink-0" aria-hidden />
+              O que mudou (visão Super Admin)
+            </CardTitle>
+            <p className="text-sm font-normal text-muted-foreground leading-relaxed pt-1">
+              Resumo das alterações recentes que afectam o teu perfil e o sistema — útil para suporte e formação.
+            </p>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            <ul className="list-disc space-y-2.5 pl-5 leading-relaxed">
+              <li>
+                <span className="font-medium text-foreground">Permissões no CRM</span> — O Super Admin utiliza o CRM
+                sem restrições de papel: contactos, campanhas, discador (conforme menu), supervisão, relatórios, equipas,
+                etc. Na <strong className="text-foreground/90 font-medium">Supervisão</strong>, vês estado de todos os
+                utilizadores e os alertas de pendentes, mesmo que o teu utilizador não tenha{" "}
+                <code className="text-xs">crmRole = coordenador</code> na base de dados.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Tarifário energia (Calculadora)</span> — Ao guardar
+                valores aqui como Super Admin, actualiza-se o <strong className="text-foreground/90 font-medium">
+                  modelo global
+                </strong>{" "}
+                de tarifas (predefinição para coordenadores que ainda não têm cópia própria).
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Auditoria</span> — A lista de auditoria só pode ser
+                consultada por Chefe de Equipa, Coordenador ou Super Admin. Os registos{" "}
+                <strong className="text-foreground/90 font-medium">não podem ser editados nem apagados</strong> pela
+                aplicação; o purge de dados na zona de perigo{" "}
+                <strong className="text-foreground/90 font-medium">nunca remove</strong> a tabela de auditoria.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">IA</span> — Nesta página defines chaves OpenAI, Gemini,
+                DeepSeek e Claude, o fornecedor preferido e fallback no servidor; também podes usar variáveis de ambiente
+                (<code className="text-xs">OPENAI_API_KEY</code>, <code className="text-xs">GEMINI_API_KEY</code>,{" "}
+                <code className="text-xs">DEEPSEEK_API_KEY</code>, <code className="text-xs">ANTHROPIC_API_KEY</code>
+                ).
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Meta diária de ligações</span> — Na página{" "}
+                <strong className="text-foreground/90 font-medium">Equipa</strong>, a meta por equipa para o cartão
+                «Chamadas hoje» pode ser definida por CE, CE Jr., Coordenador ou Super Admin; vendedores não alteram esse
+                valor.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Presença / IP na Supervisão</span> — O servidor tenta
+                ler o IP real atrás de proxy (<code className="text-xs">X-Forwarded-For</code>,{" "}
+                <code className="text-xs">X-Real-IP</code>, Cloudflare). IPs locais mostram etiqueta de rede local; em
+                produção configure o proxy e, se necessário, <code className="text-xs">TRUST_PROXY</code> no ambiente.
+              </li>
+            </ul>
+          </CardContent>
+        </Card>
 
         <Card className="shadow-sm border border-border border-l-[4px] border-l-primary">
           <CardHeader className="pb-2">
@@ -277,7 +335,7 @@ export default function SuperAdmin() {
                 Próxima versão — sugestões aceites (Beta)
               </CardTitle>
               <p className="text-sm text-muted-foreground font-normal">
-                Lista global de ideias já <strong>aceites</strong> pelos coordenadores ou por si. As mesmas entradas
+                Lista consolidada de ideias já <strong>aceites</strong> (coordenadores por empresa). As mesmas entradas
                 aparecem filtradas por empresa na página <code className="text-xs">/beta</code>.
               </p>
             </CardHeader>
@@ -378,6 +436,14 @@ export default function SuperAdmin() {
         <Card className="border-0 shadow-sm">
           <CardHeader>
             <CardTitle className="text-lg">IA</CardTitle>
+            <p className="text-sm text-muted-foreground font-normal leading-relaxed">
+              Escolhe o <strong className="font-medium text-foreground">fornecedor preferido</strong> e preenche as chaves
+              necessárias. Se o preferido falhar ou não tiver chave, o servidor tenta automaticamente os outros na ordem:
+              OpenAI → Gemini → DeepSeek → Claude (só os que têm chave configurada). Também podes usar variáveis de
+              ambiente no servidor: <code className="text-xs">OPENAI_API_KEY</code>,{" "}
+              <code className="text-xs">GEMINI_API_KEY</code>, <code className="text-xs">DEEPSEEK_API_KEY</code>,{" "}
+              <code className="text-xs">ANTHROPIC_API_KEY</code>.
+            </p>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
@@ -395,50 +461,70 @@ export default function SuperAdmin() {
               <Label>Fornecedor preferido</Label>
               <Select
                 value={form.preferredAiProvider}
-                onValueChange={(v) => setForm((s) => ({ ...s, preferredAiProvider: v }))}
+                onValueChange={(v) =>
+                  setForm((s) => ({ ...s, preferredAiProvider: v as AiProvider }))
+                }
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="openai">OpenAI</SelectItem>
-                  <SelectItem value="gemini">Gemini</SelectItem>
+                  <SelectItem value="gemini">Gemini (Google AI Studio)</SelectItem>
                   <SelectItem value="deepseek">DeepSeek</SelectItem>
-                  <SelectItem value="claude">Claude</SelectItem>
+                  <SelectItem value="claude">Claude (Anthropic)</SelectItem>
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">
+                Para fluxos com ferramentas ou resposta JSON estruturada, o sistema usa primeiro{" "}
+                <strong>OpenAI</strong> ou <strong>DeepSeek</strong> (compatível com a API OpenAI).
+              </p>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label>OpenAI API Key</Label>
                 <Input
-                  placeholder="sk-... (deixa vazio para manter)"
+                  placeholder="sk-… (deixa vazio para manter a atual)"
+                  autoComplete="off"
                   value={form.openaiApiKey}
                   onChange={(e) => setForm((s) => ({ ...s, openaiApiKey: e.target.value }))}
                 />
+                <p className="text-xs text-muted-foreground">Formato típico <code className="text-[11px]">sk-…</code></p>
               </div>
               <div className="space-y-2">
                 <Label>Gemini API Key</Label>
                 <Input
-                  placeholder="(deixa vazio para manter)"
+                  placeholder="AIza… (deixa vazio para manter)"
+                  autoComplete="off"
                   value={form.geminiApiKey}
                   onChange={(e) => setForm((s) => ({ ...s, geminiApiKey: e.target.value }))}
                 />
+                <p className="text-xs text-muted-foreground">Google AI Studio — começa por <code className="text-[11px]">AIza</code></p>
               </div>
               <div className="space-y-2">
                 <Label>DeepSeek API Key</Label>
                 <Input
-                  placeholder="(deixa vazio para manter)"
+                  placeholder="Chave da consola DeepSeek (vazio = manter)"
+                  autoComplete="off"
                   value={form.deepseekApiKey}
                   onChange={(e) => setForm((s) => ({ ...s, deepseekApiKey: e.target.value }))}
                 />
+                <p className="text-xs text-muted-foreground">
+                  API compatível com OpenAI (<code className="text-[11px]">deepseek-chat</code> por defeito). Opcional no
+                  servidor: <code className="text-[11px]">DEEPSEEK_CHAT_MODEL</code>, <code className="text-[11px]">DEEPSEEK_BASE_URL</code>.
+                </p>
               </div>
               <div className="space-y-2">
-                <Label>Claude API Key</Label>
+                <Label>Claude API Key (Anthropic)</Label>
                 <Input
-                  placeholder="(deixa vazio para manter)"
+                  placeholder="sk-ant-api… (vazio = manter)"
+                  autoComplete="off"
                   value={form.claudeApiKey}
                   onChange={(e) => setForm((s) => ({ ...s, claudeApiKey: e.target.value }))}
                 />
+                <p className="text-xs text-muted-foreground">
+                  Consola Anthropic — formato <code className="text-[11px]">sk-ant-api03-…</code>. Opcional:{" "}
+                  <code className="text-[11px]">ANTHROPIC_MODEL</code> no servidor.
+                </p>
               </div>
             </div>
 

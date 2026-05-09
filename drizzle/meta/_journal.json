@@ -120,6 +120,13 @@
       "when": 1778250008000,
       "tag": "0016_feature_suggestions",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "5",
+      "when": 1778250009000,
+      "tag": "0017_teams_daily_calls_goal",
+      "breakpoints": true
     }
   ]
 }

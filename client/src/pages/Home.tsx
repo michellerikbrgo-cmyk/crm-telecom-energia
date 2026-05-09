@@ -31,6 +31,7 @@ const STATS_EMPTY = {
   }>,
   dialerQueueEligibleCount: 0,
   rankingPosition: null as number | null,
+  dailyCallsGoal: 80,
 };
 
 export default function Home() {
@@ -96,7 +97,7 @@ export default function Home() {
             <CardContent>
               <div className="text-3xl font-bold">{stats.callsToday}</div>
               <p className="text-xs text-muted-foreground mt-1">
-                Meta diária: 80
+                Meta diária: {stats.dailyCallsGoal}
               </p>
             </CardContent>
           </Card>

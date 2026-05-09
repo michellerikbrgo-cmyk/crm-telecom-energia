@@ -40,3 +40,11 @@ export function maskSecret(value: string): string {
   return `${value.slice(0, 4)}…${value.slice(-4)}`;
 }
 
+/** Valor exibido por {@link maskSecret} — não gravar como chave nova ao guardar defin settings. */
+export function looksLikeMaskedSecret(value: string): boolean {
+  const t = value.trim();
+  if (!t) return false;
+  if (t === "********") return true;
+  return t.includes("…");
+}
+

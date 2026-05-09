@@ -492,6 +492,238 @@ function mergeGeminiContents(rows: GeminiApiContent[]): GeminiApiContent[] {
   return out;
 }
 
+async function invokeDeepSeekChat(
+  params: InvokeParams,
+  apiKey: string
+): Promise<InvokeResult> {
+  const baseURL =
+    process.env.DEEPSEEK_BASE_URL?.trim() || "https://api.deepseek.com";
+  const model =
+    process.env.DEEPSEEK_CHAT_MODEL?.trim() ||
+    process.env.DEEPSEEK_MODEL?.trim() ||
+    "deepseek-chat";
+
+  const openai = new OpenAI({ apiKey, baseURL });
+  const messages = messagesToOpenAiCompat(params.messages);
+  const maxTok = Math.min(
+    params.maxTokens ?? params.max_tokens ?? 4096,
+    8192
+  );
+
+  const body: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
+    model,
+    messages,
+    max_tokens: maxTok,
+  };
+
+  const rf = toOpenAiResponseFormat(params);
+  if (rf) {
+    body.response_format = rf;
+  }
+
+  if (params.tools?.length) {
+    body.tools = params.tools.map((t) => ({
+      type: "function" as const,
+      function: {
+        name: t.function.name,
+        description: t.function.description,
+        parameters: (t.function.parameters ?? {}) as Record<string, unknown>,
+      },
+    }));
+    const normalizedToolChoice = normalizeToolChoice(
+      params.toolChoice || params.tool_choice,
+      params.tools
+    );
+    if (normalizedToolChoice) {
+      body.tool_choice =
+        normalizedToolChoice as OpenAI.Chat.ChatCompletionToolChoiceOption;
+    }
+  }
+
+  const completion = await openai.chat.completions.create(body);
+  const ch = completion.choices[0];
+  const rawContent = ch?.message?.content;
+  const contentStr =
+    typeof rawContent === "string"
+      ? rawContent
+      : rawContent === null || rawContent === undefined
+        ? ""
+        : "";
+
+  return {
+    id: completion.id,
+    created: completion.created,
+    model: completion.model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: (ch?.message?.role as Role) || "assistant",
+          content: contentStr,
+          tool_calls: ch?.message?.tool_calls?.flatMap((tc) =>
+            tc.type === "function"
+              ? [
+                  {
+                    id: tc.id,
+                    type: "function" as const,
+                    function: {
+                      name: tc.function.name,
+                      arguments: tc.function.arguments,
+                    },
+                  },
+                ]
+              : []
+          ),
+        },
+        finish_reason: ch?.finish_reason ?? null,
+      },
+    ],
+    usage: completion.usage
+      ? {
+          prompt_tokens: completion.usage.prompt_tokens,
+          completion_tokens: completion.usage.completion_tokens,
+          total_tokens: completion.usage.total_tokens,
+        }
+      : undefined,
+  };
+}
+
+function messagesToAnthropicCompat(params: InvokeParams): {
+  system?: string;
+  messages: Array<{ role: "user" | "assistant"; content: string }>;
+} {
+  const systemChunks: string[] = [];
+  const rows: Array<{ role: "user" | "assistant"; content: string }> = [];
+
+  for (const m of params.messages) {
+    if (m.role === "system") {
+      const t = flattenMessageToText(m).trim();
+      if (t) systemChunks.push(t);
+      continue;
+    }
+    const text = flattenMessageToText(m).trim();
+    if (!text) continue;
+    const role: "user" | "assistant" =
+      m.role === "assistant" ? "assistant" : "user";
+
+    const last = rows[rows.length - 1];
+    if (last && last.role === role) {
+      last.content += "\n\n" + text;
+    } else {
+      rows.push({ role, content: text });
+    }
+  }
+
+  const system = systemChunks.join("\n\n").trim() || undefined;
+  return { system, messages: rows };
+}
+
+async function invokeClaudeChat(
+  params: InvokeParams,
+  apiKey: string
+): Promise<InvokeResult> {
+  if (params.tools?.length) {
+    throw new Error(
+      "Claude (Anthropic): tools não estão mapeados neste caminho — use OpenAI ou DeepSeek."
+    );
+  }
+
+  const rf = normalizeResponseFormat({
+    responseFormat: params.responseFormat,
+    response_format: params.response_format,
+    outputSchema: params.outputSchema,
+    output_schema: params.output_schema,
+  });
+  if (rf && rf.type !== "text") {
+    throw new Error(
+      "Claude (Anthropic): formato estruturado (JSON schema / json_object) não suportado neste caminho — use OpenAI ou DeepSeek."
+    );
+  }
+
+  const model =
+    process.env.ANTHROPIC_MODEL?.trim() ||
+    process.env.CLAUDE_MODEL?.trim() ||
+    "claude-3-5-sonnet-20241022";
+
+  const { system, messages: claudeMsgs } = messagesToAnthropicCompat(params);
+  if (claudeMsgs.length === 0) {
+    throw new Error("Nenhum conteúdo de conversa para enviar ao Claude.");
+  }
+
+  const maxTok = Math.min(
+    params.maxTokens ?? params.max_tokens ?? 4096,
+    8192
+  );
+
+  const url =
+    process.env.ANTHROPIC_API_URL?.trim() ||
+    "https://api.anthropic.com/v1/messages";
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: maxTok,
+      ...(system ? { system } : {}),
+      messages: claudeMsgs,
+    }),
+  });
+
+  const rawJson = (await response.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+
+  if (!response.ok) {
+    const errObj = rawJson.error as { message?: string } | undefined;
+    const msg =
+      errObj?.message ||
+      (typeof rawJson === "object" ? JSON.stringify(rawJson) : response.statusText);
+    throw new Error(`Claude: ${response.status} – ${msg}`);
+  }
+
+  const contentBlocks = rawJson.content as
+    | Array<{ type?: string; text?: string }>
+    | undefined;
+  const text =
+    contentBlocks
+      ?.filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("") ?? "";
+
+  const usage = rawJson.usage as
+    | { input_tokens?: number; output_tokens?: number }
+    | undefined;
+
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    id: (rawJson.id as string) || `claude-${now}`,
+    created: now,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content: text },
+        finish_reason: text ? "stop" : null,
+      },
+    ],
+    usage:
+      usage?.input_tokens != null || usage?.output_tokens != null
+        ? {
+            prompt_tokens: usage.input_tokens ?? 0,
+            completion_tokens: usage.output_tokens ?? 0,
+            total_tokens:
+              (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0),
+          }
+        : undefined,
+  };
+}
+
 async function invokeGeminiChat(
   params: InvokeParams,
   apiKey: string
@@ -621,7 +853,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   let order = await resolveChatBackendOrder(bundle);
 
   if (needsOpenAiExclusiveFeatures(params)) {
-    order = order.filter((b) => b === "openai");
+    order = order.filter((b) => b === "openai" || b === "deepseek");
   }
 
   let lastErr: unknown;
@@ -637,6 +869,16 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
           throw new Error("Sem chave Gemini (formato AIza…).");
         return await invokeGeminiChat(params, bundle.geminiKey);
       }
+      if (backend === "deepseek") {
+        if (!bundle.deepseekKey)
+          throw new Error("Sem chave DeepSeek.");
+        return await invokeDeepSeekChat(params, bundle.deepseekKey);
+      }
+      if (backend === "claude") {
+        if (!bundle.claudeKey)
+          throw new Error("Sem chave Claude / Anthropic (formato sk-ant-…).");
+        return await invokeClaudeChat(params, bundle.claudeKey);
+      }
     } catch (e) {
       lastErr = e;
       console.warn(`[invokeLLM] ${backend} falhou:`, e);
@@ -645,6 +887,6 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
 
   if (lastErr instanceof Error) throw lastErr;
   throw new Error(
-    "IA indisponível: configure **Gemini** (Super Admin ou GEMINI_API_KEY) e/ou **OpenAI** (OPENAI_API_KEY ou Super Admin, chave sk-…). No Super Admin, escolha o fornecedor preferido e guarde as chaves nos campos certos."
+    "IA indisponível: configure pelo menos um fornecedor — **OpenAI** (OPENAI_API_KEY ou Super Admin, sk-…), **Gemini** (GEMINI_API_KEY ou AIza…), **DeepSeek** (DEEPSEEK_API_KEY ou Super Admin) ou **Claude** (ANTHROPIC_API_KEY ou Super Admin, sk-ant-…). No Super Admin defina o fornecedor preferido e guarde as chaves."
   );
 }
