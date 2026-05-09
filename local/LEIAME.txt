@@ -1,0 +1,19 @@
+Pasta LOCAL — apenas nesta máquina ou servidor
+==============================================
+
+Use esta pasta para guardar de forma isolada do repositório Git:
+
+  • cópias de segurança manuais (SQL, CSV, zip)
+  • exportações temporárias
+  • ficheiros sensíveis que não devem ir para o Git
+
+O conteúdo que criar aqui (exceto este ficheiro e .gitkeep) NÃO é versionado.
+
+Uploads da aplicação (avatars, PDFs de campanhas, etc.) usam normalmente
+data/uploads/ configurado por LOCAL_UPLOAD_ROOT no .env — não é a mesma coisa
+que esta pasta.
+
+Sugestão de subpastas (crie à mão se quiser): backups/, exports/, tmp/
+
+Permissões: em servidor Linux, pode usar chmod 700 nesta pasta para só o
+utilizador do serviço aceder.
