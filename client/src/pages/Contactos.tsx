@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Phone, Search, Filter, UserPlus, PhoneCall, Pencil, AlertCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { toast } from "sonner";
@@ -90,6 +91,7 @@ function buildContactsAddPayload(form: {
 }
 
 export default function Contactos() {
+  const [, setLocation] = useLocation();
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
   const isSuperAdmin = !!(user as any)?.isSuperAdmin;
@@ -166,6 +168,7 @@ export default function Contactos() {
       toast.success("Contacto adicionado com sucesso!");
       setAddDialogOpen(false);
       await contactsQuery.refetch();
+      setLocation("/discador");
     } catch (err) {
       const msg =
         err instanceof TRPCClientError
@@ -176,7 +179,7 @@ export default function Contactos() {
       toast.error(msg);
       console.error("[contacts.add]", err);
     }
-  }, [addForm, addMutation, contactsQuery.refetch]);
+  }, [addForm, addMutation, contactsQuery.refetch, setLocation]);
 
   const [editContact, setEditContact] = useState<Record<string, unknown> | null>(null);
   const [editForm, setEditForm] = useState({

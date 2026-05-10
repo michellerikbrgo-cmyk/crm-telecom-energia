@@ -34,6 +34,7 @@ import {
   getScopedTenantCoordinatorUserId,
   getUserIdsInTenant,
   isSuperAdminUser,
+  resolveUserTeamScopeId,
   whereContactsForUser,
   whereSosRequestsForUser,
   whereUsersForUser,
@@ -54,6 +55,8 @@ import {
   summarizeUserAgent,
 } from "./_core/clientMeta";
 import { readReleaseLogMerged } from "./releaseLogStore";
+import { createPaymentCheckoutUrl } from "./payments/createCheckout";
+import { getAppPublicUrl } from "./payments/appBaseUrl";
 
 function canManageCampaigns(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
@@ -130,19 +133,6 @@ async function resolveDailyCallsGoalForUser(
     .limit(1);
   const g = row?.g;
   return typeof g === "number" && g > 0 ? g : DEFAULT_DAILY_CALLS_GOAL;
-}
-
-/** Resolve equipa só deste contexto (sem tenant isolado por domínio; um CRM, várias equipas por teamId). */
-async function resolveUserTeamScopeId(
-  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
-  user: { id: number; teamId?: number | null; crmRole?: string },
-): Promise<number | null> {
-  if (user.teamId) return user.teamId;
-  if (user.crmRole === "ce") {
-    const tl = await db.select({ id: teams.id }).from(teams).where(eq(teams.leaderId, user.id)).limit(1);
-    return tl[0]?.id ?? null;
-  }
-  return null;
 }
 
 /** Vendedor: só ele. Coordenador: tenant. CE/CEJ: utilizadores com o mesmo teamId que a equipa resolvida. */
@@ -324,11 +314,34 @@ const ROLEPLAY_SYSTEM_PREFIX =
 export const appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query(({ ctx }) => {
+    me: publicProcedure.query(async ({ ctx }) => {
       const u = ctx.user as Record<string, unknown> | null;
       if (!u) return null;
-      const { password: _omit, ...safe } = u;
-      return safe;
+      const { password: _omit, ...safe } = u as Record<string, unknown> & { password?: unknown };
+
+      let tenantLabel: string | null = null;
+      if (isSuperAdminUser(u)) {
+        tenantLabel = "Todas as empresas";
+      } else if (String(safe.crmRole) === "coordenador") {
+        const nm = typeof safe.name === "string" ? safe.name.trim() : "";
+        tenantLabel = nm || (typeof safe.email === "string" ? safe.email : null) || "Empresa";
+      } else {
+        const tid = safe.tenantId != null ? Number(safe.tenantId) : null;
+        if (tid != null && !Number.isNaN(tid)) {
+          const db = await getDb();
+          if (db) {
+            const [row] = await db
+              .select({ name: users.name, email: users.email })
+              .from(users)
+              .where(and(eq(users.id, tid), eq(users.crmRole, "coordenador")))
+              .limit(1);
+            const label = typeof row?.name === "string" ? row.name.trim() : "";
+            tenantLabel = label || row?.email || `Empresa #${tid}`;
+          }
+        }
+      }
+
+      return { ...safe, tenantLabel };
     }),
     logout: publicProcedure.mutation(async ({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -1250,6 +1263,17 @@ Regras:
           whatsappVerifyToken: "",
           userBroadcastAlert: "",
           userBroadcastAlertRevision: 0,
+          pricingPlansEnabled: false,
+          stripeEnabled: false,
+          stripePublishableKey: "",
+          stripeSecretKey: "",
+          stripeWebhookSecret: "",
+          sumupEnabled: false,
+          sumupApiKey: "",
+          paypalEnabled: false,
+          paypalClientId: "",
+          paypalClientSecret: "",
+          paypalMode: "sandbox" as const,
         };
       }
 
@@ -1267,6 +1291,17 @@ Regras:
         whatsappVerifyToken: maskSecret(decryptText(s.whatsappVerifyTokenEnc)),
         userBroadcastAlert: typeof s.userBroadcastAlert === "string" ? s.userBroadcastAlert : "",
         userBroadcastAlertRevision: s.userBroadcastAlertRevision ?? 0,
+        pricingPlansEnabled: s.pricingPlansEnabled ?? false,
+        stripeEnabled: s.stripeEnabled ?? false,
+        stripePublishableKey: s.stripePublishableKey || "",
+        stripeSecretKey: maskSecret(decryptText(s.stripeSecretKeyEnc)),
+        stripeWebhookSecret: maskSecret(decryptText(s.stripeWebhookSecretEnc)),
+        sumupEnabled: s.sumupEnabled ?? false,
+        sumupApiKey: maskSecret(decryptText(s.sumupApiKeyEnc)),
+        paypalEnabled: s.paypalEnabled ?? false,
+        paypalClientId: s.paypalClientId || "",
+        paypalClientSecret: maskSecret(decryptText(s.paypalClientSecretEnc)),
+        paypalMode: s.paypalMode === "live" ? ("live" as const) : ("sandbox" as const),
       };
     }),
 
@@ -1284,6 +1319,17 @@ Regras:
         whatsappBusinessAccountId: z.string().optional(),
         whatsappVerifyToken: z.string().optional(),
         userBroadcastAlert: z.string().nullable().optional(),
+        pricingPlansEnabled: z.boolean().optional(),
+        stripeEnabled: z.boolean().optional(),
+        stripePublishableKey: z.string().optional(),
+        stripeSecretKey: z.string().optional(),
+        stripeWebhookSecret: z.string().optional(),
+        sumupEnabled: z.boolean().optional(),
+        sumupApiKey: z.string().optional(),
+        paypalEnabled: z.boolean().optional(),
+        paypalClientId: z.string().optional(),
+        paypalClientSecret: z.string().optional(),
+        paypalMode: z.enum(["sandbox", "live"]).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -1317,6 +1363,17 @@ Regras:
         setSecret("whatsappAccessTokenEnc", input.whatsappAccessToken);
         setSecret("whatsappVerifyTokenEnc", input.whatsappVerifyToken);
 
+        if (input.stripeEnabled !== undefined) update.stripeEnabled = input.stripeEnabled;
+        if (input.stripePublishableKey !== undefined) update.stripePublishableKey = input.stripePublishableKey || null;
+        setSecret("stripeSecretKeyEnc", input.stripeSecretKey);
+        setSecret("stripeWebhookSecretEnc", input.stripeWebhookSecret);
+        if (input.sumupEnabled !== undefined) update.sumupEnabled = input.sumupEnabled;
+        setSecret("sumupApiKeyEnc", input.sumupApiKey);
+        if (input.paypalEnabled !== undefined) update.paypalEnabled = input.paypalEnabled;
+        if (input.paypalClientId !== undefined) update.paypalClientId = input.paypalClientId || null;
+        setSecret("paypalClientSecretEnc", input.paypalClientSecret);
+        if (input.paypalMode !== undefined) update.paypalMode = input.paypalMode;
+
         if (input.userBroadcastAlert !== undefined) {
           const trimmed =
             input.userBroadcastAlert === null ? "" : String(input.userBroadcastAlert).trim();
@@ -1324,6 +1381,8 @@ Regras:
           const prevRev = Number(existing[0]?.userBroadcastAlertRevision ?? 0);
           update.userBroadcastAlertRevision = prevRev + 1;
         }
+
+        if (input.pricingPlansEnabled !== undefined) update.pricingPlansEnabled = input.pricingPlansEnabled;
 
         if (existing[0]) {
           await db.update(appSettings).set(update).where(eq(appSettings.id, existing[0].id));
@@ -1342,6 +1401,17 @@ Regras:
             whatsappVerifyTokenEnc: update.whatsappVerifyTokenEnc ?? null,
             userBroadcastAlert: update.userBroadcastAlert ?? null,
             userBroadcastAlertRevision: update.userBroadcastAlertRevision ?? 0,
+            pricingPlansEnabled: update.pricingPlansEnabled ?? false,
+            stripeEnabled: update.stripeEnabled ?? false,
+            stripePublishableKey: update.stripePublishableKey ?? null,
+            stripeSecretKeyEnc: update.stripeSecretKeyEnc ?? null,
+            stripeWebhookSecretEnc: update.stripeWebhookSecretEnc ?? null,
+            sumupEnabled: update.sumupEnabled ?? false,
+            sumupApiKeyEnc: update.sumupApiKeyEnc ?? null,
+            paypalEnabled: update.paypalEnabled ?? false,
+            paypalClientId: update.paypalClientId ?? null,
+            paypalClientSecretEnc: update.paypalClientSecretEnc ?? null,
+            paypalMode: update.paypalMode ?? "sandbox",
             updatedBy: user?.id,
           } as any);
         }
@@ -1354,6 +1424,49 @@ Regras:
         });
 
         return { success: true };
+      }),
+
+    /** Abre pagamento de teste no gateway (Stripe Checkout, SumUp ou PayPal). */
+    createPaymentCheckout: superAdminProcedure
+      .input(
+        z.object({
+          provider: z.enum(["stripe", "sumup", "paypal"]),
+          amountEUR: z.number().min(0.5).max(50000).optional().default(1),
+          description: z.string().max(200).optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Base de dados indisponível");
+
+        const rows = await db.select().from(appSettings).limit(1);
+        const s = rows[0];
+        if (!s) throw new Error("Guarde primeiro as definições da aplicação (criar appSettings).");
+
+        if (input.provider === "stripe" && !s.stripeEnabled) {
+          throw new Error("Active o Stripe no separador Pagamentos e guarde.");
+        }
+        if (input.provider === "sumup" && !s.sumupEnabled) {
+          throw new Error("Active o SumUp no separador Pagamentos e guarde.");
+        }
+        if (input.provider === "paypal" && !s.paypalEnabled) {
+          throw new Error("Active o PayPal no separador Pagamentos e guarde.");
+        }
+
+        const checkoutUrl = await createPaymentCheckoutUrl(input.provider, {
+          amountEUR: input.amountEUR,
+          description: input.description?.trim() ?? "",
+          appBaseUrl: getAppPublicUrl(),
+          secrets: {
+            stripeSecretKey: decryptText(s.stripeSecretKeyEnc),
+            sumupApiKey: decryptText(s.sumupApiKeyEnc),
+            paypalClientId: s.paypalClientId || null,
+            paypalClientSecret: decryptText(s.paypalClientSecretEnc),
+            paypalSandbox: (s.paypalMode || "sandbox") !== "live",
+          },
+        });
+
+        return { checkoutUrl };
       }),
 
     purgeData: superAdminProcedure

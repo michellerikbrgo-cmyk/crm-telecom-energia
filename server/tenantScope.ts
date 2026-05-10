@@ -1,6 +1,21 @@
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { getDb } from "./db";
-import { contacts, sosRequests, users } from "../drizzle/schema";
+import { contacts, sosRequests, teams, users } from "../drizzle/schema";
+
+/**
+ * Equipa em contexto (CE sem teamId na conta resolve pela equipa onde é líder).
+ */
+export async function resolveUserTeamScopeId(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  user: { id: number; teamId?: number | null; crmRole?: string },
+): Promise<number | null> {
+  if (user.teamId) return user.teamId;
+  if (user.crmRole === "ce") {
+    const tl = await db.select({ id: teams.id }).from(teams).where(eq(teams.leaderId, user.id)).limit(1);
+    return tl[0]?.id ?? null;
+  }
+  return null;
+}
 
 export function isSuperAdminUser(u: { isSuperAdmin?: unknown } | null | undefined): boolean {
   const v = u?.isSuperAdmin;

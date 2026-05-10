@@ -60,6 +60,20 @@ export const appSettings = mysqlTable("appSettings", {
   /** Mensagem global mostrada aos utilizadores (exc. Super Admin). Incrementa revisão ao guardar. */
   userBroadcastAlert: text("userBroadcastAlert"),
   userBroadcastAlertRevision: int("userBroadcastAlertRevision").default(0).notNull(),
+  /** Página /planos e menu «Planos» — desactivado por defeito; só Super Admin activa. */
+  pricingPlansEnabled: boolean("pricingPlansEnabled").default(false).notNull(),
+  // Pagamentos (credenciais sensíveis encriptadas como os demais segredos)
+  stripeEnabled: boolean("stripeEnabled").default(false).notNull(),
+  stripePublishableKey: varchar("stripePublishableKey", { length: 255 }),
+  stripeSecretKeyEnc: text("stripeSecretKeyEnc"),
+  stripeWebhookSecretEnc: text("stripeWebhookSecretEnc"),
+  sumupEnabled: boolean("sumupEnabled").default(false).notNull(),
+  sumupApiKeyEnc: text("sumupApiKeyEnc"),
+  paypalEnabled: boolean("paypalEnabled").default(false).notNull(),
+  paypalClientId: varchar("paypalClientId", { length: 255 }),
+  paypalClientSecretEnc: text("paypalClientSecretEnc"),
+  /** sandbox | live */
+  paypalMode: varchar("paypalMode", { length: 16 }).default("sandbox").notNull(),
   // audit
   updatedBy: int("updatedBy"),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

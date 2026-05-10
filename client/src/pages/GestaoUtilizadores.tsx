@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Users, UserPlus } from "lucide-react";
 import { useState } from "react";
+import { Redirect } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { toast } from "sonner";
@@ -15,6 +16,10 @@ export default function GestaoUtilizadores() {
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
   const isSuperAdmin = !!(user as any)?.isSuperAdmin;
+
+  if (!isSuperAdmin && crmRole === "vendedor") {
+    return <Redirect to="/painel" />;
+  }
   const [showDialog, setShowDialog] = useState(false);
   const [newUser, setNewUser] = useState({
     name: "",
@@ -234,8 +239,12 @@ export default function GestaoUtilizadores() {
                       <div>
                         <p className="font-medium">{u.name || "Sem nome"}</p>
                         <p className="text-sm text-muted-foreground">{u.email}</p>
-                        {u.tenantId != null && (
-                          <p className="text-xs text-muted-foreground">tenant: coordenador #{u.tenantId}</p>
+                        {(u.companyName || u.tenantId != null) && (
+                          <p className="text-xs text-muted-foreground">
+                            Empresa: {typeof u.companyName === "string" && u.companyName.trim()
+                              ? u.companyName.trim()
+                              : `coordenador #${u.tenantId}`}
+                          </p>
                         )}
                       </div>
                     </div>

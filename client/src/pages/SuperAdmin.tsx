@@ -8,11 +8,30 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { SuperAdminPaymentsPanel } from "@/pages/super-admin/SuperAdminPaymentsPanel";
 import { toast } from "sonner";
-import { AlertTriangle, BookOpen, Hourglass, Info, Rocket, ScrollText } from "lucide-react";
+import {
+  AlertTriangle,
+  Archive,
+  BookOpen,
+  CreditCard,
+  FileSpreadsheet,
+  Hourglass,
+  Info,
+  LayoutGrid,
+  MessageSquare,
+  PhoneCall,
+  Plug,
+  Rocket,
+  ScrollText,
+  ShieldAlert,
+  UserCircle,
+} from "lucide-react";
+import { useLocation } from "wouter";
 import atualizacoesMd from "@shared/ATUALIZACOES.md?raw";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 
 function formatReleaseAt(iso: string) {
@@ -117,7 +136,33 @@ function ReleaseLogRetentionCountdown({ atIso }: { atIso: string }) {
 
 type AiProvider = "openai" | "gemini" | "deepseek" | "claude";
 
+type SuperAdminFormState = {
+  aiEnabled: boolean;
+  preferredAiProvider: AiProvider;
+  openaiApiKey: string;
+  geminiApiKey: string;
+  deepseekApiKey: string;
+  claudeApiKey: string;
+  whatsappEnabled: boolean;
+  whatsappAccessToken: string;
+  whatsappPhoneNumberId: string;
+  whatsappBusinessAccountId: string;
+  whatsappVerifyToken: string;
+  pricingPlansEnabled: boolean;
+  stripeEnabled: boolean;
+  stripePublishableKey: string;
+  stripeSecretKey: string;
+  stripeWebhookSecret: string;
+  sumupEnabled: boolean;
+  sumupApiKey: string;
+  paypalEnabled: boolean;
+  paypalClientId: string;
+  paypalClientSecret: string;
+  paypalMode: "sandbox" | "live";
+};
+
 export default function SuperAdmin() {
+  const [, setLocation] = useLocation();
   const { user } = useAuth();
   const isSuperOnly = !!(user as { isSuperAdmin?: boolean } | null)?.isSuperAdmin;
   const utils = trpc.useUtils();
@@ -131,6 +176,7 @@ export default function SuperAdmin() {
       toast.success("Configurações guardadas");
       await settingsQuery.refetch();
       await utils.system.getUserBroadcastAlert.invalidate();
+      await utils.system.getPricingPlansFeature.invalidate();
     },
     onError: (e: any) => toast.error(e.message),
   });
@@ -140,7 +186,7 @@ export default function SuperAdmin() {
     onError: (e: any) => toast.error(e.message),
   });
 
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<SuperAdminFormState>({
     aiEnabled: true,
     preferredAiProvider: "openai" as AiProvider,
     openaiApiKey: "",
@@ -152,6 +198,17 @@ export default function SuperAdmin() {
     whatsappPhoneNumberId: "",
     whatsappBusinessAccountId: "",
     whatsappVerifyToken: "",
+    pricingPlansEnabled: false,
+    stripeEnabled: false,
+    stripePublishableKey: "",
+    stripeSecretKey: "",
+    stripeWebhookSecret: "",
+    sumupEnabled: false,
+    sumupApiKey: "",
+    paypalEnabled: false,
+    paypalClientId: "",
+    paypalClientSecret: "",
+    paypalMode: "sandbox",
   });
 
   const [purgeScope, setPurgeScope] = useState<"crm_only" | "all_except_audit">("crm_only");
@@ -174,18 +231,84 @@ export default function SuperAdmin() {
       whatsappPhoneNumberId: d.whatsappPhoneNumberId ?? "",
       whatsappBusinessAccountId: d.whatsappBusinessAccountId ?? "",
       whatsappVerifyToken: d.whatsappVerifyToken ?? "",
+      pricingPlansEnabled: d.pricingPlansEnabled ?? false,
+      stripeEnabled: d.stripeEnabled ?? false,
+      stripePublishableKey: d.stripePublishableKey ?? "",
+      stripeSecretKey: d.stripeSecretKey ?? "",
+      stripeWebhookSecret: d.stripeWebhookSecret ?? "",
+      sumupEnabled: d.sumupEnabled ?? false,
+      sumupApiKey: d.sumupApiKey ?? "",
+      paypalEnabled: d.paypalEnabled ?? false,
+      paypalClientId: d.paypalClientId ?? "",
+      paypalClientSecret: d.paypalClientSecret ?? "",
+      paypalMode: d.paypalMode === "live" ? "live" : "sandbox",
     });
   }, [settingsQuery.data]);
+
+  const paymentSlice = useMemo(
+    () => ({
+      stripeEnabled: form.stripeEnabled,
+      stripePublishableKey: form.stripePublishableKey,
+      stripeSecretKey: form.stripeSecretKey,
+      stripeWebhookSecret: form.stripeWebhookSecret,
+      sumupEnabled: form.sumupEnabled,
+      sumupApiKey: form.sumupApiKey,
+      paypalEnabled: form.paypalEnabled,
+      paypalClientId: form.paypalClientId,
+      paypalClientSecret: form.paypalClientSecret,
+      paypalMode: form.paypalMode as "sandbox" | "live",
+    }),
+    [
+      form.stripeEnabled,
+      form.stripePublishableKey,
+      form.stripeSecretKey,
+      form.stripeWebhookSecret,
+      form.sumupEnabled,
+      form.sumupApiKey,
+      form.paypalEnabled,
+      form.paypalClientId,
+      form.paypalClientSecret,
+      form.paypalMode,
+    ],
+  );
 
   return (
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Super Admin</h1>
           <p className="text-muted-foreground">
-            IA, armazenamento local, WhatsApp e zona de perigo
+            Configuração global, integrações e zona de perigo — organizado por separadores.
           </p>
         </div>
 
+        <Tabs defaultValue="overview" className="w-full">
+          <TabsList className="flex h-auto min-h-11 w-full flex-wrap justify-start gap-1 rounded-lg bg-muted/70 p-1.5 text-muted-foreground">
+            <TabsTrigger value="overview" className="gap-1.5 px-3 py-2">
+              <LayoutGrid className="h-4 w-4 shrink-0" aria-hidden />
+              Visão geral
+            </TabsTrigger>
+            <TabsTrigger value="comms" className="gap-1.5 px-3 py-2">
+              <MessageSquare className="h-4 w-4 shrink-0" aria-hidden />
+              Comunicação
+            </TabsTrigger>
+            <TabsTrigger value="integrations" className="gap-1.5 px-3 py-2">
+              <Plug className="h-4 w-4 shrink-0" aria-hidden />
+              Integrações
+            </TabsTrigger>
+            <TabsTrigger value="logs" className="gap-1.5 px-3 py-2">
+              <Archive className="h-4 w-4 shrink-0" aria-hidden />
+              Registos
+            </TabsTrigger>
+            <TabsTrigger
+              value="danger"
+              className="gap-1.5 px-3 py-2 text-destructive data-[state=active]:bg-destructive/15 data-[state=active]:text-destructive"
+            >
+              <ShieldAlert className="h-4 w-4 shrink-0" aria-hidden />
+              Perigo
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="overview" className="mt-6 space-y-6 outline-none">
         <Card className="border-0 shadow-sm border-l-4 border-l-amber-600/70 bg-amber-500/[0.07] dark:bg-amber-950/25">
           <CardHeader className="pb-2">
             <CardTitle className="text-lg flex items-center gap-2">
@@ -238,10 +361,52 @@ export default function SuperAdmin() {
                 <code className="text-xs">X-Real-IP</code>, Cloudflare). IPs locais mostram etiqueta de rede local; em
                 produção configure o proxy e, se necessário, <code className="text-xs">TRUST_PROXY</code> no ambiente.
               </li>
+              <li>
+                <span className="font-medium text-foreground">Contactos → Discador</span> — Ao{" "}
+                <strong className="text-foreground/90 font-medium">adicionar um contacto manualmente</strong> na página
+                Contactos ou ao <strong className="text-foreground/90 font-medium">importar uma lista</strong> na Base de
+                dados, a aplicação <strong className="text-foreground/90 font-medium">abre o Discador</strong> de seguida
+                para começar a trabalhar a lead.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Pagamentos</span> — No separador{" "}
+                <strong className="text-foreground/90 font-medium">Integrações</strong> podes configurar Stripe, SumUp e
+                PayPal (chaves encriptadas na base). Os webhooks públicos são{" "}
+                <code className="text-xs">/api/webhooks/stripe</code> e{" "}
+                <code className="text-xs">/api/webhooks/paypal</code>.
+              </li>
             </ul>
           </CardContent>
         </Card>
 
+        <Card className="border-0 shadow-sm">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-lg flex items-center gap-2">
+              <PhoneCall className="h-5 w-5 text-primary shrink-0" aria-hidden />
+              Atalhos CRM
+            </CardTitle>
+            <p className="text-sm font-normal text-muted-foreground leading-relaxed pt-1">
+              Contactos e importação; após guardar com sucesso és enviado para o Discador.
+            </p>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" className="gap-2" onClick={() => setLocation("/contactos")}>
+              <UserCircle className="h-4 w-4" aria-hidden />
+              Contactos
+            </Button>
+            <Button type="button" variant="outline" className="gap-2" onClick={() => setLocation("/base-dados")}>
+              <FileSpreadsheet className="h-4 w-4" aria-hidden />
+              Base de dados
+            </Button>
+            <Button type="button" variant="outline" className="gap-2" onClick={() => setLocation("/discador")}>
+              <PhoneCall className="h-4 w-4" aria-hidden />
+              Discador
+            </Button>
+          </CardContent>
+        </Card>
+          </TabsContent>
+
+          <TabsContent value="logs" className="mt-6 space-y-6 outline-none">
         <Card className="shadow-sm border border-border border-l-[4px] border-l-primary">
           <CardHeader className="pb-2">
             <CardTitle className="text-lg flex items-center gap-2">
@@ -388,7 +553,9 @@ export default function SuperAdmin() {
             </ScrollArea>
           </CardContent>
         </Card>
+          </TabsContent>
 
+          <TabsContent value="comms" className="mt-6 space-y-6 outline-none">
         <Card className="border-0 shadow-sm">
           <CardHeader>
             <CardTitle className="text-lg">Alerta aos utilizadores</CardTitle>
@@ -433,6 +600,44 @@ export default function SuperAdmin() {
           </CardContent>
         </Card>
 
+        <Card className="border-0 shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <CreditCard className="h-5 w-5 text-primary shrink-0" aria-hidden />
+              Planos para empresas
+            </CardTitle>
+            <p className="text-sm text-muted-foreground font-normal leading-relaxed">
+              Por defeito <strong className="font-medium text-foreground">desactivado</strong>. Quando activo, aparece o
+              item «Planos (exemplo)» no menu e a página <code className="text-xs">/planos</code> com o modelo de exemplo:
+              assinatura por empresa (coord., CE e CEJ incluídos) + custo por lugar de vendedor (valores ilustrativos).
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
+              <div>
+                <div className="font-medium">Mostrar página de planos no CRM</div>
+                <div className="text-sm text-muted-foreground">
+                  Menu lateral e rota visíveis para utilizadores com acesso
+                </div>
+              </div>
+              <Switch
+                checked={form.pricingPlansEnabled}
+                onCheckedChange={(v) => setForm((s) => ({ ...s, pricingPlansEnabled: !!v }))}
+              />
+            </div>
+            <Button
+              type="button"
+              className="w-full"
+              disabled={updateMutation.isPending}
+              onClick={() => updateMutation.mutate({ pricingPlansEnabled: form.pricingPlansEnabled })}
+            >
+              {updateMutation.isPending ? "A guardar..." : "Guardar planos"}
+            </Button>
+          </CardContent>
+        </Card>
+          </TabsContent>
+
+          <TabsContent value="integrations" className="mt-6 space-y-6 outline-none">
         <Card className="border-0 shadow-sm">
           <CardHeader>
             <CardTitle className="text-lg">IA</CardTitle>
@@ -597,6 +802,14 @@ export default function SuperAdmin() {
           </CardContent>
         </Card>
 
+        <SuperAdminPaymentsPanel
+          payment={paymentSlice}
+          onPaymentChange={(patch) => setForm((s) => ({ ...s, ...patch }))}
+          updateMutation={updateMutation}
+        />
+          </TabsContent>
+
+          <TabsContent value="danger" className="mt-6 space-y-6 outline-none">
         <Card className="border-0 shadow-sm">
           <CardHeader>
             <CardTitle className="text-lg flex items-center gap-2 text-destructive">
@@ -639,6 +852,8 @@ export default function SuperAdmin() {
             </Button>
           </CardContent>
         </Card>
+          </TabsContent>
+        </Tabs>
       </div>
   );
 }
