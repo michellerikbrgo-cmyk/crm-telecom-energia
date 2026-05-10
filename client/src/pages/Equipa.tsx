@@ -3,7 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Users, Mail, Info } from "lucide-react";
+import { Users, Mail, Info, Target } from "lucide-react";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
@@ -21,6 +21,7 @@ export default function Equipa() {
 
   const [newTeamName, setNewTeamName] = useState("");
   const [localEmails, setLocalEmails] = useState<Record<number, string>>({});
+  const [localDailyGoals, setLocalDailyGoals] = useState<Record<number, string>>({});
 
   const createMutation = trpc.teams.create.useMutation({
     onSuccess: () => {
@@ -40,18 +41,41 @@ export default function Equipa() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Erro ao guardar e-mail"),
   });
 
+  const saveDailyGoalMutation = trpc.teams.updateDailyCallsGoal.useMutation({
+    onSuccess: () => {
+      toast.success("Meta de ligações guardada");
+      void listQuery.refetch();
+      void mineQuery.refetch();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Erro ao guardar meta"),
+  });
+
   const getDisplayEmailForTeamRow = (teamId: number, serverEmail: string | null | undefined) =>
     localEmails[teamId] !== undefined ? localEmails[teamId] : (serverEmail ?? "");
 
   const mineTeam = mineQuery.data;
   const [mineEmail, setMineEmail] = useState("");
+  const [mineDailyGoal, setMineDailyGoal] = useState("");
+
+  useEffect(() => {
+    if (!listQuery.data?.length) return;
+    setLocalDailyGoals(() => {
+      const next: Record<number, string> = {};
+      for (const t of listQuery.data as Array<{ id: number; dailyCallsGoal?: number | null }>) {
+        next[t.id] = String(t.dailyCallsGoal ?? 80);
+      }
+      return next;
+    });
+  }, [listQuery.data]);
 
   useEffect(() => {
     if (!mineTeam) {
       setMineEmail("");
+      setMineDailyGoal("");
       return;
     }
     setMineEmail(mineTeam.contactEmail ?? "");
+    setMineDailyGoal(String((mineTeam as { dailyCallsGoal?: number | null }).dailyCallsGoal ?? 80));
   }, [mineTeam]);
 
   const roleBadge =
@@ -102,6 +126,10 @@ export default function Equipa() {
                 <span className="font-medium text-foreground">Vendedor</span> — contactos assignados só a si distribuição, sem esta página no menu lateral.
               </li>
               <li>
+                <span className="font-medium text-foreground">Meta diária de ligações</span> — objectivo por equipa para o cartão «Chamadas hoje» no painel; só{" "}
+                <span className="font-medium text-foreground">CE / CE Jr. / Coordenador / Super Admin</span> podem definir ou alterar (vendedor não).
+              </li>
+              <li>
                 <span className="font-medium text-foreground">E-mail da equipa</span> — contacto oficial por equipa. O isolamento entre empresas é o <span className="font-medium text-foreground">tenantId</span>; dentro da empresa o refinamento usa <span className="font-medium text-foreground">teamId</span>.
               </li>
             </ul>
@@ -142,7 +170,14 @@ export default function Equipa() {
                 <p className="text-sm text-muted-foreground py-6 text-center">Ainda não existem registos na tabela de equipas.</p>
               ) : (
                 <div className="space-y-4">
-                  {listQuery.data.map((t: { id: number; name: string; contactEmail: string | null; leaderId: number | null }) => (
+                  {listQuery.data.map(
+                    (t: {
+                      id: number;
+                      name: string;
+                      contactEmail: string | null;
+                      leaderId: number | null;
+                      dailyCallsGoal?: number | null;
+                    }) => (
                     <div key={t.id} className="rounded-lg border p-4 space-y-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="font-medium">{t.name}</div>
@@ -176,6 +211,52 @@ export default function Equipa() {
                             }}
                           >
                             Guardar
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="space-y-2 max-w-xl border-t border-border/60 pt-3">
+                        <Label htmlFor={`team-goal-${t.id}`} className="flex items-center gap-2">
+                          <Target className="h-4 w-4 text-muted-foreground" aria-hidden />
+                          Meta diária de ligações
+                        </Label>
+                        <p className="text-xs text-muted-foreground">
+                          Chamadas visadas por dia no painel («Chamadas hoje»). Apenas CE, CE Jr., Coordenador ou Super Admin.
+                        </p>
+                        <div className="flex flex-wrap gap-2 items-center">
+                          <Input
+                            id={`team-goal-${t.id}`}
+                            type="number"
+                            min={1}
+                            max={999}
+                            className="w-28"
+                            value={
+                              localDailyGoals[t.id] !== undefined
+                                ? localDailyGoals[t.id]
+                                : String(t.dailyCallsGoal ?? 80)
+                            }
+                            onChange={(e) =>
+                              setLocalDailyGoals((prev) => ({ ...prev, [t.id]: e.target.value }))
+                            }
+                          />
+                          <Button
+                            type="button"
+                            variant="secondary"
+                            disabled={saveDailyGoalMutation.isPending}
+                            onClick={() => {
+                              const raw =
+                                localDailyGoals[t.id] ?? String(t.dailyCallsGoal ?? 80);
+                              const n = Number(String(raw).trim());
+                              if (!Number.isFinite(n) || n < 1 || n > 999) {
+                                toast.error("Indique um número entre 1 e 999.");
+                                return;
+                              }
+                              saveDailyGoalMutation.mutate({
+                                teamId: t.id,
+                                dailyCallsGoal: Math.floor(n),
+                              });
+                            }}
+                          >
+                            Guardar meta
                           </Button>
                         </div>
                       </div>
@@ -233,6 +314,44 @@ export default function Equipa() {
                         }}
                       >
                         Guardar
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-2 border-t border-border/60 pt-4">
+                    <Label htmlFor="mine-team-goal" className="flex items-center gap-2">
+                      <Target className="h-4 w-4 text-muted-foreground" aria-hidden />
+                      Meta diária de ligações
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      Objectivo de chamadas por dia no painel. Vendedores não podem alterar este valor.
+                    </p>
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <Input
+                        id="mine-team-goal"
+                        type="number"
+                        min={1}
+                        max={999}
+                        className="w-28"
+                        value={mineDailyGoal}
+                        onChange={(e) => setMineDailyGoal(e.target.value)}
+                      />
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        disabled={saveDailyGoalMutation.isPending}
+                        onClick={() => {
+                          const n = Number(String(mineDailyGoal).trim());
+                          if (!Number.isFinite(n) || n < 1 || n > 999) {
+                            toast.error("Indique um número entre 1 e 999.");
+                            return;
+                          }
+                          saveDailyGoalMutation.mutate({
+                            teamId: mineTeam.id,
+                            dailyCallsGoal: Math.floor(n),
+                          });
+                        }}
+                      >
+                        Guardar meta
                       </Button>
                     </div>
                   </div>

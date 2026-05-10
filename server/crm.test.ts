@@ -120,13 +120,18 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("auth.removeAvatar");
   });
 
-  it("should expose system.ping and blacklist.list", () => {
+  it("should expose system.ping, getPricingPlansFeature and blacklist.list", () => {
     expect(appRouter._def.procedures).toHaveProperty("system.ping");
+    expect(appRouter._def.procedures).toHaveProperty("system.getPricingPlansFeature");
     expect(appRouter._def.procedures).toHaveProperty("blacklist.list");
   });
 
   it("should have admin.getReleaseLog for Super Admin changelog", () => {
     expect(appRouter._def.procedures).toHaveProperty("admin.getReleaseLog");
+  });
+
+  it("should expose admin.createPaymentCheckout for gateways", () => {
+    expect(appRouter._def.procedures).toHaveProperty("admin.createPaymentCheckout");
   });
 
   it("should have system.getUserBroadcastAlert", () => {

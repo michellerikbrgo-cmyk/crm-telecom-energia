@@ -84,7 +84,7 @@ export function useAuth(options?: UseAuthOptions) {
    * identidade do objecto mutation pode mudar a cada render e provoca loop infinito
    * (stack minificado tm/Qt no react-vendor).
    */
-  const presenceUserId = meQuery.data?.id;
+  const presenceUserId = (meQuery.data as { id?: number } | null | undefined)?.id;
   const presenceBootstrappedFor = useRef<number | null>(null);
 
   useEffect(() => {

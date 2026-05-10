@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/sidebar";
 // import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User, Ban, ClipboardList, Beaker } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User, Ban, ClipboardList, Beaker, CreditCard } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
@@ -48,6 +48,7 @@ const menuItems: MenuItem[] = [
   { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: FileText, label: "Contratos", path: "/contratos", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Calculator, label: "Calculadora", path: "/calculadora", roles: ["vendedor", "cej", "ce", "coordenador"] },
+  { icon: CreditCard, label: "Planos (exemplo)", path: "/planos", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Bot, label: "IA Objeções", path: "/ia-objecoes", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Megaphone, label: "Campanhas", path: "/campanhas", roles: ["vendedor", "cej", "ce", "coordenador"] },
   { icon: Trophy, label: "Ranking", path: "/ranking", roles: ["vendedor", "cej", "ce", "coordenador"] },
@@ -145,7 +146,12 @@ function DashboardLayoutContent({
   const sidebarRef = useRef<HTMLDivElement>(null);
   const userCrmRole = (user as any)?.crmRole || "vendedor";
   const isSuperAdmin = !!(user as any)?.isSuperAdmin;
+  const pricingPlansQuery = trpc.system.getPricingPlansFeature.useQuery(undefined, {
+    staleTime: 30_000,
+  });
   const filteredMenuItems = menuItems.filter(item => {
+    if (item.path === "/planos" && !pricingPlansQuery.data?.enabled) return false;
+    if (item.path === "/utilizadores" && userCrmRole === "vendedor") return false;
     if (!item.roles) return true;
     if (isSuperAdmin) return true;
     if (item.roles.includes("super_admin")) return false;
@@ -158,6 +164,7 @@ function DashboardLayoutContent({
     name?: string | null;
     email?: string | null;
     avatarUrl?: string | null;
+    tenantLabel?: string | null;
   } | null | undefined;
   const displayName = typeof profile?.name === "string" ? profile.name : "";
   const displayEmail = typeof profile?.email === "string" ? profile.email : "";
@@ -268,6 +275,11 @@ function DashboardLayoutContent({
                     <p className="text-xs text-muted-foreground truncate mt-1.5">
                       {displayEmail || "-"}
                     </p>
+                    {profile?.tenantLabel ? (
+                      <p className="text-[11px] text-muted-foreground/90 truncate mt-0.5" title={profile.tenantLabel}>
+                        Empresa: {profile.tenantLabel}
+                      </p>
+                    ) : null}
                   </div>
                 </button>
               </DropdownMenuTrigger>

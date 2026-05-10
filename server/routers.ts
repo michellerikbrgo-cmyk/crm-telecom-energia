@@ -34,20 +34,29 @@ import {
   getScopedTenantCoordinatorUserId,
   getUserIdsInTenant,
   isSuperAdminUser,
+  resolveUserTeamScopeId,
   whereContactsForUser,
   whereSosRequestsForUser,
   whereUsersForUser,
   whereInTenantUserIds,
 } from "./tenantScope";
 import { storagePut } from "./storage";
-import { decryptText, encryptText, maskSecret } from "./_core/cryptoSecrets";
+import {
+  decryptText,
+  encryptText,
+  looksLikeMaskedSecret,
+  maskSecret,
+} from "./_core/cryptoSecrets";
 import {
   getClientIp,
   getClientUserAgent,
+  isPrivateOrLocalIp,
   lookupGeoLabel,
   summarizeUserAgent,
 } from "./_core/clientMeta";
 import { readReleaseLogMerged } from "./releaseLogStore";
+import { createPaymentCheckoutUrl } from "./payments/createCheckout";
+import { getAppPublicUrl } from "./payments/appBaseUrl";
 
 function canManageCampaigns(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
@@ -84,17 +93,46 @@ function canManageTeamsTable(user: unknown): boolean {
   return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
 }
 
-/** Resolve equipa só deste contexto (sem tenant isolado por domínio; um CRM, várias equipas por teamId). */
-async function resolveUserTeamScopeId(
+/** Meta de ligações: qualquer papel acima de vendedor (CEJ, CE, coordenador, Super Admin). */
+function canSetDailyCallsGoal(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(
+    u?.isSuperAdmin ||
+    ["cej", "ce", "coordenador"].includes(u?.crmRole || "")
+  );
+}
+
+const DEFAULT_DAILY_CALLS_GOAL = 80;
+
+async function resolveDailyCallsGoalForUser(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
-  user: { id: number; teamId?: number | null; crmRole?: string },
-): Promise<number | null> {
-  if (user.teamId) return user.teamId;
-  if (user.crmRole === "ce") {
-    const tl = await db.select({ id: teams.id }).from(teams).where(eq(teams.leaderId, user.id)).limit(1);
-    return tl[0]?.id ?? null;
+  user: Record<string, unknown> | null | undefined,
+): Promise<number> {
+  if (!user?.id) return DEFAULT_DAILY_CALLS_GOAL;
+  const u = user as {
+    id: number;
+    teamId?: number | null;
+    crmRole?: string;
+  };
+  let teamId: number | null = null;
+  if (u.crmRole === "vendedor") {
+    teamId = u.teamId ?? null;
+  } else {
+    const scope = await resolveUserTeamScopeId(db, {
+      id: u.id,
+      teamId: u.teamId ?? null,
+      crmRole: u.crmRole,
+    });
+    teamId = scope ?? (u.crmRole === "coordenador" ? (u.teamId ?? null) : null);
   }
-  return null;
+  if (teamId == null) return DEFAULT_DAILY_CALLS_GOAL;
+  const [row] = await db
+    .select({ g: teams.dailyCallsGoal })
+    .from(teams)
+    .where(eq(teams.id, teamId))
+    .limit(1);
+  const g = row?.g;
+  return typeof g === "number" && g > 0 ? g : DEFAULT_DAILY_CALLS_GOAL;
 }
 
 /** Vendedor: só ele. Coordenador: tenant. CE/CEJ: utilizadores com o mesmo teamId que a equipa resolvida. */
@@ -276,11 +314,34 @@ const ROLEPLAY_SYSTEM_PREFIX =
 export const appRouter = router({
   system: systemRouter,
   auth: router({
-    me: publicProcedure.query(({ ctx }) => {
+    me: publicProcedure.query(async ({ ctx }) => {
       const u = ctx.user as Record<string, unknown> | null;
       if (!u) return null;
-      const { password: _omit, ...safe } = u;
-      return safe;
+      const { password: _omit, ...safe } = u as Record<string, unknown> & { password?: unknown };
+
+      let tenantLabel: string | null = null;
+      if (isSuperAdminUser(u)) {
+        tenantLabel = "Todas as empresas";
+      } else if (String(safe.crmRole) === "coordenador") {
+        const nm = typeof safe.name === "string" ? safe.name.trim() : "";
+        tenantLabel = nm || (typeof safe.email === "string" ? safe.email : null) || "Empresa";
+      } else {
+        const tid = safe.tenantId != null ? Number(safe.tenantId) : null;
+        if (tid != null && !Number.isNaN(tid)) {
+          const db = await getDb();
+          if (db) {
+            const [row] = await db
+              .select({ name: users.name, email: users.email })
+              .from(users)
+              .where(and(eq(users.id, tid), eq(users.crmRole, "coordenador")))
+              .limit(1);
+            const label = typeof row?.name === "string" ? row.name.trim() : "";
+            tenantLabel = label || row?.email || `Empresa #${tid}`;
+          }
+        }
+      }
+
+      return { ...safe, tenantLabel };
     }),
     logout: publicProcedure.mutation(async ({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
@@ -1202,6 +1263,17 @@ Regras:
           whatsappVerifyToken: "",
           userBroadcastAlert: "",
           userBroadcastAlertRevision: 0,
+          pricingPlansEnabled: false,
+          stripeEnabled: false,
+          stripePublishableKey: "",
+          stripeSecretKey: "",
+          stripeWebhookSecret: "",
+          sumupEnabled: false,
+          sumupApiKey: "",
+          paypalEnabled: false,
+          paypalClientId: "",
+          paypalClientSecret: "",
+          paypalMode: "sandbox" as const,
         };
       }
 
@@ -1219,6 +1291,17 @@ Regras:
         whatsappVerifyToken: maskSecret(decryptText(s.whatsappVerifyTokenEnc)),
         userBroadcastAlert: typeof s.userBroadcastAlert === "string" ? s.userBroadcastAlert : "",
         userBroadcastAlertRevision: s.userBroadcastAlertRevision ?? 0,
+        pricingPlansEnabled: s.pricingPlansEnabled ?? false,
+        stripeEnabled: s.stripeEnabled ?? false,
+        stripePublishableKey: s.stripePublishableKey || "",
+        stripeSecretKey: maskSecret(decryptText(s.stripeSecretKeyEnc)),
+        stripeWebhookSecret: maskSecret(decryptText(s.stripeWebhookSecretEnc)),
+        sumupEnabled: s.sumupEnabled ?? false,
+        sumupApiKey: maskSecret(decryptText(s.sumupApiKeyEnc)),
+        paypalEnabled: s.paypalEnabled ?? false,
+        paypalClientId: s.paypalClientId || "",
+        paypalClientSecret: maskSecret(decryptText(s.paypalClientSecretEnc)),
+        paypalMode: s.paypalMode === "live" ? ("live" as const) : ("sandbox" as const),
       };
     }),
 
@@ -1236,6 +1319,17 @@ Regras:
         whatsappBusinessAccountId: z.string().optional(),
         whatsappVerifyToken: z.string().optional(),
         userBroadcastAlert: z.string().nullable().optional(),
+        pricingPlansEnabled: z.boolean().optional(),
+        stripeEnabled: z.boolean().optional(),
+        stripePublishableKey: z.string().optional(),
+        stripeSecretKey: z.string().optional(),
+        stripeWebhookSecret: z.string().optional(),
+        sumupEnabled: z.boolean().optional(),
+        sumupApiKey: z.string().optional(),
+        paypalEnabled: z.boolean().optional(),
+        paypalClientId: z.string().optional(),
+        paypalClientSecret: z.string().optional(),
+        paypalMode: z.enum(["sandbox", "live"]).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -1254,6 +1348,7 @@ Regras:
           if (value === undefined) return;
           const trimmed = value.trim();
           if (!trimmed) return; // keep existing if empty
+          if (looksLikeMaskedSecret(trimmed)) return; // UI mask — não substituir chave real
           update[field] = encryptText(trimmed);
         };
 
@@ -1268,6 +1363,17 @@ Regras:
         setSecret("whatsappAccessTokenEnc", input.whatsappAccessToken);
         setSecret("whatsappVerifyTokenEnc", input.whatsappVerifyToken);
 
+        if (input.stripeEnabled !== undefined) update.stripeEnabled = input.stripeEnabled;
+        if (input.stripePublishableKey !== undefined) update.stripePublishableKey = input.stripePublishableKey || null;
+        setSecret("stripeSecretKeyEnc", input.stripeSecretKey);
+        setSecret("stripeWebhookSecretEnc", input.stripeWebhookSecret);
+        if (input.sumupEnabled !== undefined) update.sumupEnabled = input.sumupEnabled;
+        setSecret("sumupApiKeyEnc", input.sumupApiKey);
+        if (input.paypalEnabled !== undefined) update.paypalEnabled = input.paypalEnabled;
+        if (input.paypalClientId !== undefined) update.paypalClientId = input.paypalClientId || null;
+        setSecret("paypalClientSecretEnc", input.paypalClientSecret);
+        if (input.paypalMode !== undefined) update.paypalMode = input.paypalMode;
+
         if (input.userBroadcastAlert !== undefined) {
           const trimmed =
             input.userBroadcastAlert === null ? "" : String(input.userBroadcastAlert).trim();
@@ -1275,6 +1381,8 @@ Regras:
           const prevRev = Number(existing[0]?.userBroadcastAlertRevision ?? 0);
           update.userBroadcastAlertRevision = prevRev + 1;
         }
+
+        if (input.pricingPlansEnabled !== undefined) update.pricingPlansEnabled = input.pricingPlansEnabled;
 
         if (existing[0]) {
           await db.update(appSettings).set(update).where(eq(appSettings.id, existing[0].id));
@@ -1293,6 +1401,17 @@ Regras:
             whatsappVerifyTokenEnc: update.whatsappVerifyTokenEnc ?? null,
             userBroadcastAlert: update.userBroadcastAlert ?? null,
             userBroadcastAlertRevision: update.userBroadcastAlertRevision ?? 0,
+            pricingPlansEnabled: update.pricingPlansEnabled ?? false,
+            stripeEnabled: update.stripeEnabled ?? false,
+            stripePublishableKey: update.stripePublishableKey ?? null,
+            stripeSecretKeyEnc: update.stripeSecretKeyEnc ?? null,
+            stripeWebhookSecretEnc: update.stripeWebhookSecretEnc ?? null,
+            sumupEnabled: update.sumupEnabled ?? false,
+            sumupApiKeyEnc: update.sumupApiKeyEnc ?? null,
+            paypalEnabled: update.paypalEnabled ?? false,
+            paypalClientId: update.paypalClientId ?? null,
+            paypalClientSecretEnc: update.paypalClientSecretEnc ?? null,
+            paypalMode: update.paypalMode ?? "sandbox",
             updatedBy: user?.id,
           } as any);
         }
@@ -1305,6 +1424,49 @@ Regras:
         });
 
         return { success: true };
+      }),
+
+    /** Abre pagamento de teste no gateway (Stripe Checkout, SumUp ou PayPal). */
+    createPaymentCheckout: superAdminProcedure
+      .input(
+        z.object({
+          provider: z.enum(["stripe", "sumup", "paypal"]),
+          amountEUR: z.number().min(0.5).max(50000).optional().default(1),
+          description: z.string().max(200).optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Base de dados indisponível");
+
+        const rows = await db.select().from(appSettings).limit(1);
+        const s = rows[0];
+        if (!s) throw new Error("Guarde primeiro as definições da aplicação (criar appSettings).");
+
+        if (input.provider === "stripe" && !s.stripeEnabled) {
+          throw new Error("Active o Stripe no separador Pagamentos e guarde.");
+        }
+        if (input.provider === "sumup" && !s.sumupEnabled) {
+          throw new Error("Active o SumUp no separador Pagamentos e guarde.");
+        }
+        if (input.provider === "paypal" && !s.paypalEnabled) {
+          throw new Error("Active o PayPal no separador Pagamentos e guarde.");
+        }
+
+        const checkoutUrl = await createPaymentCheckoutUrl(input.provider, {
+          amountEUR: input.amountEUR,
+          description: input.description?.trim() ?? "",
+          appBaseUrl: getAppPublicUrl(),
+          secrets: {
+            stripeSecretKey: decryptText(s.stripeSecretKeyEnc),
+            sumupApiKey: decryptText(s.sumupApiKeyEnc),
+            paypalClientId: s.paypalClientId || null,
+            paypalClientSecret: decryptText(s.paypalClientSecretEnc),
+            paypalSandbox: (s.paypalMode || "sandbox") !== "live",
+          },
+        });
+
+        return { checkoutUrl };
       }),
 
     purgeData: superAdminProcedure
@@ -1448,6 +1610,7 @@ Regras:
           overduePendenteCount: 0,
           salesMonth: 0,
           totalContacts: 0,
+          dailyCallsGoal: DEFAULT_DAILY_CALLS_GOAL,
           salesPipeline: { aguarda_instalacao: 0, em_aberto: 0, activo: 0, e_switch: 0, cancelado: 0 },
           pendenteAlerts: [] as Array<{
             id: number;
@@ -1609,12 +1772,15 @@ Regras:
       const idx = sorted.findIndex(r => r.vendedorId === user?.id);
       if (idx >= 0) rankingPosition = idx + 1;
 
+      const dailyCallsGoal = await resolveDailyCallsGoalForUser(db, user);
+
       return {
         callsToday: callsResult[0]?.count || 0,
         pendentesToday: pendentesResult[0]?.count || 0,
         overduePendenteCount: overdueResult[0]?.count || 0,
         salesMonth: salesResult[0]?.count || 0,
         totalContacts: 0,
+        dailyCallsGoal,
         salesPipeline,
         pendenteAlerts,
         dialerQueueEligibleCount,
@@ -1843,8 +2009,7 @@ Regras:
 
       if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) return [];
 
-      // Coordenador: visão global. CE / CEJ: só membros da mesma equipa (teamId ou, para CE, via teams.leaderId).
-      let q = db.select({
+      const selectSupervisionUsers = {
         id: users.id,
         name: users.name,
         email: users.email,
@@ -1859,8 +2024,26 @@ Regras:
         lastSeenIp: users.lastSeenIp,
         lastSeenUserAgent: users.lastSeenUserAgent,
         lastSeenGeo: users.lastSeenGeo,
-      }).from(users);
+      };
 
+      const mapDevice = (r: Record<string, unknown>) => ({
+        ...r,
+        deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
+      });
+
+      /** Super Admin (mesmo sem crmRole coordenador) vê todos os utilizadores com filtro tenant «ALL». */
+      if (isSuperAdminUser(user)) {
+        let q = db.select(selectSupervisionUsers).from(users);
+        const uw = whereUsersForUser(user as any);
+        const parts: SQL[] = [];
+        if (uw) parts.push(uw);
+        if (parts.length) q = (q as any).where(and(...parts));
+        const rows = await (q as any);
+        return rows.map(mapDevice);
+      }
+
+      // Coordenador: visão global no tenant. CE / CEJ: só membros da mesma equipa.
+      let q = db.select(selectSupervisionUsers).from(users);
       const uw = whereUsersForUser(user as any);
       const parts: SQL[] = [];
       if (uw) parts.push(uw);
@@ -1868,10 +2051,7 @@ Regras:
       if (user?.crmRole === "coordenador") {
         if (parts.length) q = (q as any).where(and(...parts));
         const rows = await (q as any);
-        return rows.map((r: Record<string, unknown>) => ({
-          ...r,
-          deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
-        }));
+        return rows.map(mapDevice);
       }
 
       const scopeId = await resolveUserTeamScopeId(db, {
@@ -1886,17 +2066,14 @@ Regras:
       q = (q as any).where(and(...parts));
 
       const rows = await (q as any);
-      return rows.map((r: Record<string, unknown>) => ({
-        ...r,
-        deviceSummary: summarizeUserAgent(String(r.lastSeenUserAgent ?? "")),
-      }));
+      return rows.map(mapDevice);
     }),
 
     alerts: protectedProcedure.query(async ({ ctx }) => {
       const db = await getDb();
       if (!db) return [];
       const user = ctx.user as any;
-      if (!["cej", "ce", "coordenador"].includes(user?.crmRole)) return [];
+      if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) return [];
 
       const now = new Date();
       const overdue: SQL[] = [
@@ -2270,11 +2447,18 @@ Regras:
     }),
   }),
 
-  // ============ AUDIT ============
+  // ============ AUDIT (só leitura — nunca UPDATE/DELETE na app; linhas intocáveis) ============
   audit: router({
     list: protectedProcedure
       .input(z.object({ limit: z.number().default(50) }).optional())
-      .query(async ({ input }) => {
+      .query(async ({ ctx, input }) => {
+        const user = ctx.user as any;
+        if (
+          !["ce", "coordenador"].includes(user?.crmRole ?? "") &&
+          !isSuperAdminUser(user)
+        ) {
+          throw new Error("Sem permissão para consultar a auditoria.");
+        }
         const db = await getDb();
         if (!db) return [];
         const rows = await db
@@ -2555,6 +2739,7 @@ Regras:
         .select({
           isOnline: users.isOnline,
           lastSeenIp: users.lastSeenIp,
+          lastSeenGeo: users.lastSeenGeo,
           presenceSessionStartedAt: users.presenceSessionStartedAt,
         })
         .from(users)
@@ -2578,7 +2763,19 @@ Regras:
         } as any)
         .where(eq(users.id, user.id));
 
-      if (ip && (wasOffline || ipChanged)) {
+      /**
+       * Geolocalização: antes só corria se IP mudava ou reaparecia offline — mas o contexto tRPC
+       * já marca `isOnline` em cada pedido, logo `wasOffline` era quase sempre false e `lastSeenGeo`
+       * ficava vazio. Actualizar quando: sem geo, mudou IP, estava offline, ou IP local/privado (rótulo fixo).
+       */
+      const needsGeoRefresh =
+        !!ip &&
+        (!before?.lastSeenGeo ||
+          wasOffline ||
+          ipChanged ||
+          isPrivateOrLocalIp(ip));
+
+      if (needsGeoRefresh) {
         void lookupGeoLabel(ip).then((geo) => {
           if (!geo) return;
           void db.update(users).set({ lastSeenGeo: geo } as any).where(eq(users.id, user.id));
@@ -2705,6 +2902,35 @@ Regras:
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
+
+        /** Modelo global (tarifário por defeito) — só Super Admin altera directamente. */
+        if (isSuperAdminUser(user)) {
+          const globalRows = await db
+            .select()
+            .from(energyConfig)
+            .where(sql`${energyConfig.tenantCoordinatorUserId} IS NULL`)
+            .limit(1);
+          if (globalRows[0]) {
+            await db
+              .update(energyConfig)
+              .set({ ...input, updatedBy: user?.id })
+              .where(eq(energyConfig.id, globalRows[0].id));
+          } else {
+            await db.insert(energyConfig).values({
+              tenantCoordinatorUserId: null,
+              priceKwhSimples: input.priceKwhSimples,
+              priceKwhBiHorariaPonta: input.priceKwhBiHorariaPonta,
+              priceKwhBiHorariaVazio: input.priceKwhBiHorariaVazio,
+              baseDiscountPercent: input.baseDiscountPercent,
+              vdfClientExtraPercent: input.vdfClientExtraPercent,
+              vdfGasClientExtraPercent: input.vdfGasClientExtraPercent,
+              reembolsoPercent: input.reembolsoPercent,
+              updatedBy: user?.id,
+            } as any);
+          }
+          return { success: true };
+        }
+
         if (user?.crmRole !== "coordenador") throw new Error("Apenas o Coordenador pode alterar a configuração");
 
         const tid = user.tenantId;
@@ -2854,6 +3080,57 @@ Regras:
         assertEntityTenant(tm as any, user, "Equipa");
 
         await db.update(teams).set({ contactEmail: emailVal }).where(eq(teams.id, input.teamId));
+        return { success: true as const };
+      }),
+
+    updateDailyCallsGoal: protectedProcedure
+      .input(
+        z.object({
+          teamId: z.number().int(),
+          dailyCallsGoal: z.number().int().min(1).max(999),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (!canSetDailyCallsGoal(user)) {
+          throw new Error(
+            "Apenas Chefes de Equipa, Chefes Jr., Coordenadores ou Super Admin podem definir a meta de ligações.",
+          );
+        }
+
+        const [tm] = await db.select().from(teams).where(eq(teams.id, input.teamId)).limit(1);
+        if (!tm) throw new Error("Equipa não encontrada");
+
+        if (canManageTeamsTable(user)) {
+          assertEntityTenant(tm as any, user, "Equipa");
+          await db
+            .update(teams)
+            .set({ dailyCallsGoal: input.dailyCallsGoal })
+            .where(eq(teams.id, input.teamId));
+          return { success: true as const };
+        }
+
+        if (!["ce", "cej"].includes(user?.crmRole ?? "")) {
+          throw new Error("Sem permissão para alterar esta equipa.");
+        }
+
+        const scopeId = await resolveUserTeamScopeId(db, {
+          id: user.id,
+          teamId: user.teamId ?? null,
+          crmRole: user.crmRole,
+        });
+
+        if (scopeId !== input.teamId) {
+          throw new Error("Só pode definir a meta da própria equipa.");
+        }
+        assertEntityTenant(tm as any, user, "Equipa");
+
+        await db
+          .update(teams)
+          .set({ dailyCallsGoal: input.dailyCallsGoal })
+          .where(eq(teams.id, input.teamId));
         return { success: true as const };
       }),
   }),

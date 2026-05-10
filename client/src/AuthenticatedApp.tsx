@@ -25,6 +25,7 @@ const Supervisao = lazy(() => import("@/pages/Supervisao"));
 const ListaNegra = lazy(() => import("@/pages/ListaNegra"));
 const Acompanhamento = lazy(() => import("@/pages/Acompanhamento"));
 const Beta = lazy(() => import("@/pages/Beta"));
+const PlanosEmpresas = lazy(() => import("@/pages/PlanosEmpresas"));
 
 /** Carregado só nas rotas autenticadas — não entra no chunk do /login */
 export default function AuthenticatedApp() {
@@ -40,6 +41,7 @@ export default function AuthenticatedApp() {
             <Route path="/pendentes" component={Pendentes} />
             <Route path="/contratos" component={Contratos} />
             <Route path="/calculadora" component={Calculadora} />
+            <Route path="/planos" component={PlanosEmpresas} />
             <Route path="/ia-objecoes" component={IAObjecoes} />
             <Route path="/campanhas" component={Campanhas} />
             <Route path="/ranking" component={Ranking} />

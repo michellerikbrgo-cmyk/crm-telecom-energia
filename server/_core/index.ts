@@ -9,6 +9,7 @@ import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { registerPaymentWebhooks } from "../payments/registerWebhooks";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -31,9 +32,23 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 
 async function startServer() {
   const app = express();
-  /** IP real atrás de Nginx / proxy (X-Forwarded-For). */
-  app.set("trust proxy", 1);
+  /**
+   * IP real atrás de Nginx / Cloudflare. `TRUST_PROXY`: número de proxies (ex.: 2),
+   * ou `true` para confiar no cabeçalho (só se o Node não estiver exposto directamente à Internet).
+   */
+  const tp = process.env.TRUST_PROXY;
+  const trustProxy =
+    tp === "true" || tp === "1"
+      ? true
+      : tp && /^\d+$/.test(tp)
+        ? parseInt(tp, 10)
+        : 1;
+  app.set("trust proxy", trustProxy);
   const server = createServer(app);
+
+  /** Webhooks de pagamento (Stripe precisa de body raw — registar antes do JSON global). */
+  registerPaymentWebhooks(app);
+
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));

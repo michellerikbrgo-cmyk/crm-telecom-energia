@@ -4,6 +4,22 @@ import { trpc } from "@/lib/trpc";
 import { AlertTriangle, Phone, Users } from "lucide-react";
 import { useEffect, useState } from "react";
 
+/** Rotulo quando o servidor ainda não gravou `lastSeenGeo` mas o IP é claramente local/privado. */
+function fallbackGeoFromIp(ip: string | null | undefined): string | null {
+  if (!ip?.trim()) return null;
+  const s = ip.trim().replace(/^::ffff:/, "");
+  if (s === "::1" || s === "127.0.0.1") return "Rede local / IP privado";
+  if (
+    s.startsWith("192.168.") ||
+    s.startsWith("10.") ||
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(s) ||
+    /^fe[c-f][0-9a-f]:/i.test(s)
+  ) {
+    return "Rede local / IP privado";
+  }
+  return null;
+}
+
 function formatActiveDuration(startedAt: unknown): string {
   if (!startedAt) return "—";
   const t = new Date(startedAt as string).getTime();
@@ -77,7 +93,7 @@ export default function Supervisao() {
                         </div>
                         <div>
                           <span className="font-medium text-foreground">Localização: </span>
-                          {u.lastSeenGeo || "—"}
+                          {u.lastSeenGeo || fallbackGeoFromIp(u.lastSeenIp) || "—"}
                         </div>
                         <div className="sm:col-span-2">
                           <span className="font-medium text-foreground">Dispositivo: </span>

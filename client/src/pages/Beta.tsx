@@ -77,10 +77,9 @@ export default function Beta() {
           Beta — sugestões de funcionalidades
         </h1>
         <p className="text-muted-foreground">
-          Envie ideias para melhorar o CRM. O{" "}
-          <strong>Coordenador</strong> da sua empresa e o <strong>Super Admin</strong> podem aceitar ou recusar.
-          Sugestões <strong>aceites</strong> entram no roadmap da próxima versão (visível ao Super Admin para todo o
-          sistema; na sua empresa vê-se o que foi aceite para o seu tenant).
+          Envie ideias para melhorar o CRM. O <strong>coordenador</strong> da sua empresa pode{" "}
+          <strong>aceitar ou recusar</strong> sugestões no âmbito da organização. Sugestões{" "}
+          <strong>aceites</strong> entram no roadmap da próxima versão — abaixo vê o que foi aprovado para a sua empresa.
         </p>
       </div>
 

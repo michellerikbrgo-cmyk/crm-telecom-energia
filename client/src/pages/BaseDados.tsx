@@ -5,10 +5,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Zap, Upload, FileSpreadsheet, Plus } from "lucide-react";
 import { useState, useRef } from "react";
+import { useLocation } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
 
 export default function BaseDados() {
+  const [, setLocation] = useLocation();
   const [file, setFile] = useState<File | null>(null);
   const [columns, setColumns] = useState<string[]>([]);
   const [rows, setRows] = useState<any[]>([]);
@@ -29,6 +31,7 @@ export default function BaseDados() {
       setNameCol("");
       setListName("");
       setIsUploading(false);
+      setLocation("/discador");
     },
     onError: (err: any) => {
       toast.error(err.message);

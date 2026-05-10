@@ -4,12 +4,13 @@ import { z } from "zod";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getDb } from "./db";
 import { users } from "../drizzle/schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
+import { alias } from "drizzle-orm/mysql-core";
+import { isSuperAdminUser, resolveUserTeamScopeId, whereUsersForUser } from "./tenantScope";
 import bcrypt from "bcryptjs";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { sdk } from "./_core/sdk";
-import { whereUsersForUser } from "./tenantScope";
 import {
   getClientIp,
   getClientUserAgent,
@@ -232,24 +233,86 @@ export const authLocalRouter = router({
       return [];
     }
 
-    const tenantWhere = whereUsersForUser(currentUser);
-    let q = db
-      .select({
-        id: users.id,
-        name: users.name,
-        email: users.email,
-        crmRole: users.crmRole,
-        tenantId: users.tenantId,
-        isSuperAdmin: (users as any).isSuperAdmin,
-        isOnline: users.isOnline,
-        createdAt: users.createdAt,
-      })
-      .from(users);
+    const coordinator = alias(users, "tenant_coord");
+    const baseSelect = {
+      id: users.id,
+      name: users.name,
+      email: users.email,
+      crmRole: users.crmRole,
+      tenantId: users.tenantId,
+      isSuperAdmin: (users as any).isSuperAdmin,
+      isOnline: users.isOnline,
+      createdAt: users.createdAt,
+      companyName: coordinator.name,
+    };
 
-    if (tenantWhere) {
-      q = (q as any).where(tenantWhere);
+    if (isSuperAdminUser(currentUser)) {
+      const tenantWhere = whereUsersForUser(currentUser);
+      let q = db
+        .select(baseSelect)
+        .from(users)
+        .leftJoin(coordinator, eq(coordinator.id, users.tenantId));
+      if (tenantWhere) q = (q as any).where(tenantWhere);
+      return await q;
     }
 
-    return await q;
+    const role = String(currentUser.crmRole || "");
+    const uid = Number(currentUser.id);
+
+    if (role === "coordenador") {
+      const tid =
+        currentUser.tenantId != null && !Number.isNaN(Number(currentUser.tenantId))
+          ? Number(currentUser.tenantId)
+          : uid;
+      return await db
+        .select(baseSelect)
+        .from(users)
+        .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
+        .where(eq(users.tenantId, tid));
+    }
+
+    const tenantIdNum =
+      currentUser.tenantId != null ? Number(currentUser.tenantId) : NaN;
+    if (Number.isNaN(tenantIdNum)) {
+      return [];
+    }
+
+    if (role === "ce") {
+      const scopeId = await resolveUserTeamScopeId(db, {
+        id: uid,
+        teamId: (currentUser as { teamId?: number | null }).teamId ?? null,
+        crmRole: "ce",
+      });
+      if (scopeId == null) return [];
+      const hierarchyCond = or(
+        eq(users.id, uid),
+        and(eq(users.teamId, scopeId), inArray(users.crmRole, ["vendedor", "cej"])),
+      );
+      return await db
+        .select(baseSelect)
+        .from(users)
+        .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
+        .where(and(eq(users.tenantId, tenantIdNum), hierarchyCond));
+    }
+
+    if (role === "cej") {
+      const scopeId = await resolveUserTeamScopeId(db, {
+        id: uid,
+        teamId: (currentUser as { teamId?: number | null }).teamId ?? null,
+        crmRole: "cej",
+      });
+      if (scopeId == null) return [];
+      const hierarchyCond = or(
+        eq(users.id, uid),
+        and(eq(users.teamId, scopeId), eq(users.crmRole, "vendedor")),
+      );
+      return await db
+        .select(baseSelect)
+        .from(users)
+        .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
+        .where(and(eq(users.tenantId, tenantIdNum), hierarchyCond));
+    }
+
+    return [];
   }),
 });

@@ -33,6 +33,17 @@ export const systemRouter = router({
       } as const;
     }),
 
+  /**
+   * Funcionalidade «Planos para empresas» (/planos). Por defeito desactivada;
+   * só o Super Admin activa em admin.updateSettings (pricingPlansEnabled).
+   */
+  getPricingPlansFeature: protectedProcedure.query(async () => {
+    const db = await getDb();
+    if (!db) return { enabled: false as boolean };
+    const rows = await db.select({ enabled: appSettings.pricingPlansEnabled }).from(appSettings).limit(1);
+    return { enabled: !!rows[0]?.enabled };
+  }),
+
   /** Aviso configurado na Super Admin para todos os utilizadores autenticados (UI omite Super Admin). */
   getUserBroadcastAlert: protectedProcedure.query(async () => {
     const db = await getDb();
