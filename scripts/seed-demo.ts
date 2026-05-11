@@ -164,6 +164,7 @@ async function main() {
         notes: c.notes,
         assignedTo: vendId,
         addedBy: coordId,
+        addedSource: "import",
         listName: "Lista demo seed",
       } as any);
       const [last] = await tx

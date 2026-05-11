@@ -119,6 +119,8 @@ export const contacts = mysqlTable("contacts", {
   campaignOffered: varchar("campaignOffered", { length: 255 }),
   offerValue: varchar("offerValue", { length: 100 }),
   listName: varchar("listName", { length: 255 }),
+  /** manual = formulário Contactos (48h exclusividade para outros vendedores); bulk = importação; import = legado. */
+  addedSource: mysqlEnum("addedSource", ["manual", "bulk", "import", "system"]).default("import").notNull(),
   isLead: boolean("isLead").default(false).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -270,7 +272,7 @@ export const featureSuggestions = mysqlTable("featureSuggestions", {
   authorId: int("authorId").notNull(),
   title: varchar("title", { length: 255 }).notNull(),
   body: text("body").notNull(),
-  status: mysqlEnum("status", ["pending", "accepted", "rejected"]).default("pending").notNull(),
+  status: mysqlEnum("status", ["pending", "accepted", "rejected", "completed"]).default("pending").notNull(),
   reviewedBy: int("reviewedBy"),
   reviewedAt: timestamp("reviewedAt"),
   reviewNote: text("reviewNote"),
@@ -279,6 +281,20 @@ export const featureSuggestions = mysqlTable("featureSuggestions", {
 });
 
 export type FeatureSuggestion = typeof featureSuggestions.$inferSelect;
+
+// ============ FEATURE SUGGESTION EDITS (audit de edições) ============
+export const featureSuggestionEdits = mysqlTable("featureSuggestionEdits", {
+  id: int("id").autoincrement().primaryKey(),
+  suggestionId: int("suggestionId").notNull(),
+  editedBy: int("editedBy").notNull(),
+  oldTitle: varchar("oldTitle", { length: 255 }).notNull(),
+  oldBody: text("oldBody").notNull(),
+  newTitle: varchar("newTitle", { length: 255 }).notNull(),
+  newBody: text("newBody").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type FeatureSuggestionEdit = typeof featureSuggestionEdits.$inferSelect;
 
 // ============ SALES ============
 export const sales = mysqlTable("sales", {
@@ -291,6 +307,8 @@ export const sales = mysqlTable("sales", {
   status: mysqlEnum("status", ["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).default("aguarda_instalacao").notNull(),
   cancelReason: text("cancelReason"),
   installationDate: timestamp("installationDate"),
+  /** JSON (texto): campos opcionais da ficha de contrato — ver shared/saleContractDossier.ts */
+  saleContractDossier: text("saleContractDossier"),
   closedAt: timestamp("closedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

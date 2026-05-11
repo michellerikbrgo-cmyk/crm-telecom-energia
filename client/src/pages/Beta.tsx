@@ -15,10 +15,19 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { trpc } from "@/lib/trpc";
-import { Beaker, Check, Loader2, Send, X } from "lucide-react";
-import { useState } from "react";
+import { Beaker, Check, Loader2, Pencil, Send, Trash2, X } from "lucide-react";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 
 export default function Beta() {
@@ -31,11 +40,24 @@ export default function Beta() {
   const [body, setBody] = useState("");
   const [reviewOpen, setReviewOpen] = useState<{ id: number; decision: "accepted" | "rejected" } | null>(null);
   const [reviewNote, setReviewNote] = useState("");
+  const [editOpenId, setEditOpenId] = useState<number | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editBody, setEditBody] = useState("");
 
   const utils = trpc.useUtils();
   const mineQuery = trpc.beta.listMine.useQuery();
   const pendingQuery = trpc.beta.listPending.useQuery(undefined, { enabled: canReview });
   const acceptedQuery = trpc.beta.listAccepted.useQuery();
+
+  const currentEditRow = useMemo(() => {
+    if (!editOpenId) return null;
+    return (mineQuery.data ?? []).find((r) => r.id === editOpenId) ?? null;
+  }, [editOpenId, mineQuery.data]);
+
+  const editsQuery = trpc.beta.listEdits.useQuery(
+    { id: editOpenId as number },
+    { enabled: editOpenId != null },
+  );
 
   const submitMutation = trpc.beta.submit.useMutation({
     onSuccess: async () => {
@@ -56,6 +78,38 @@ export default function Beta() {
       await utils.beta.listPending.invalidate();
       await utils.beta.listMine.invalidate();
       await utils.beta.listAccepted.invalidate();
+    },
+    onError: (e) => toast.error(e.message ?? "Erro."),
+  });
+
+  const editMutation = trpc.beta.edit.useMutation({
+    onSuccess: async () => {
+      toast.success("Sugestão editada");
+      await utils.beta.listMine.invalidate();
+      if (canReview) await utils.beta.listPending.invalidate();
+      await utils.beta.listAccepted.invalidate();
+      if (editOpenId != null) await utils.beta.listEdits.invalidate({ id: editOpenId });
+      setEditOpenId(null);
+    },
+    onError: (e) => toast.error(e.message ?? "Erro."),
+  });
+
+  const completeMutation = trpc.beta.markCompleted.useMutation({
+    onSuccess: async () => {
+      toast.success("Sugestão concluída");
+      await utils.beta.listAccepted.invalidate();
+      await utils.beta.listMine.invalidate();
+    },
+    onError: (e) => toast.error(e.message ?? "Erro."),
+  });
+
+  const deleteMutation = trpc.beta.delete.useMutation({
+    onSuccess: async () => {
+      toast.success("Sugestão excluída");
+      await utils.beta.listAccepted.invalidate();
+      await utils.beta.listMine.invalidate();
+      if (canReview) await utils.beta.listPending.invalidate();
+      setEditOpenId(null);
     },
     onError: (e) => toast.error(e.message ?? "Erro."),
   });
@@ -222,6 +276,11 @@ export default function Beta() {
                   <li key={s.id} className="border-b border-border/60 pb-3 last:border-0">
                     <div className="flex flex-wrap gap-2 items-center mb-1">
                       <span className="font-medium">{s.title}</span>
+                      {s.status === "completed" ? (
+                        <Badge variant="secondary" className="text-[10px] font-normal">
+                          Concluída
+                        </Badge>
+                      ) : null}
                       {isSuper ? (
                         <Badge variant="outline" className="text-[10px] font-normal">
                           {s.tenantLabel}
@@ -233,6 +292,35 @@ export default function Beta() {
                       {s.authorName ?? "—"}
                       {s.acceptedAt ? ` · Aceite em ${new Date(s.acceptedAt).toLocaleString("pt-PT")}` : ""}
                     </p>
+                    {canReview ? (
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {s.status === "accepted" ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={completeMutation.isPending}
+                            onClick={() => completeMutation.mutate({ id: s.id })}
+                            className="gap-1"
+                          >
+                            <Check className="h-4 w-4" />
+                            Concluir
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={deleteMutation.isPending}
+                            onClick={() => deleteMutation.mutate({ id: s.id })}
+                            className="gap-1 text-destructive border-destructive/40"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            Excluir
+                          </Button>
+                        )}
+                      </div>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -258,6 +346,7 @@ export default function Beta() {
                     <th className="p-2 font-medium">Título</th>
                     <th className="p-2 font-medium">Estado</th>
                     <th className="p-2 font-medium">Data</th>
+                    <th className="p-2 font-medium w-[140px]">Ações</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -273,7 +362,9 @@ export default function Beta() {
                               ? "default"
                               : r.status === "rejected"
                                 ? "destructive"
-                                : "secondary"
+                                : r.status === "completed"
+                                  ? "secondary"
+                                  : "secondary"
                           }
                           className="text-[10px]"
                         >
@@ -281,11 +372,44 @@ export default function Beta() {
                             ? "Pendente"
                             : r.status === "accepted"
                               ? "Aceite"
-                              : "Recusada"}
+                              : r.status === "completed"
+                                ? "Concluída"
+                                : "Recusada"}
                         </Badge>
                       </td>
                       <td className="p-2 text-muted-foreground whitespace-nowrap text-xs">
                         {r.createdAt ? new Date(r.createdAt).toLocaleString("pt-PT") : "—"}
+                      </td>
+                      <td className="p-2">
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="gap-1"
+                            onClick={() => {
+                              setEditOpenId(r.id);
+                              setEditTitle(r.title);
+                              setEditBody(r.body);
+                            }}
+                          >
+                            <Pencil className="h-4 w-4" />
+                            Ver / Editar
+                          </Button>
+                          {(r.status === "pending" || r.status === "rejected") ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="gap-1 text-destructive border-destructive/40"
+                              disabled={deleteMutation.isPending}
+                              onClick={() => deleteMutation.mutate({ id: r.id })}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Excluir
+                            </Button>
+                          ) : null}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -295,6 +419,99 @@ export default function Beta() {
           )}
         </CardContent>
       </Card>
+
+      <Sheet
+        open={editOpenId != null}
+        onOpenChange={(o) => {
+          if (!o) setEditOpenId(null);
+        }}
+      >
+        <SheetContent side="right" className="w-full sm:max-w-xl flex flex-col p-0 gap-0">
+          <SheetHeader className="p-6 pb-3 border-b shrink-0 text-left">
+            <SheetTitle>Sugestão</SheetTitle>
+            <SheetDescription className="text-left">
+              {currentEditRow?.status === "pending"
+                ? "Pendente — pode editar."
+                : currentEditRow?.status === "rejected"
+                  ? "Recusada — pode editar e reenviar como nova, ou excluir."
+                  : currentEditRow?.status === "completed"
+                    ? "Concluída."
+                    : "Aceite."}
+            </SheetDescription>
+          </SheetHeader>
+
+          <ScrollArea className="flex-1 min-h-0 px-6">
+            <div className="py-4 space-y-5 pr-3">
+              <div className="space-y-2">
+                <Label htmlFor="beta-edit-title">Título</Label>
+                <Input
+                  id="beta-edit-title"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  maxLength={255}
+                  disabled={currentEditRow?.status !== "pending"}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="beta-edit-body">Descrição</Label>
+                <Textarea
+                  id="beta-edit-body"
+                  value={editBody}
+                  onChange={(e) => setEditBody(e.target.value)}
+                  rows={7}
+                  maxLength={8000}
+                  disabled={currentEditRow?.status !== "pending"}
+                />
+              </div>
+
+              <Separator />
+
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Histórico de edições</p>
+                {editsQuery.isLoading ? (
+                  <p className="text-xs text-muted-foreground">A carregar…</p>
+                ) : !editsQuery.data?.length ? (
+                  <p className="text-xs text-muted-foreground">Sem edições.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {editsQuery.data.map((e) => (
+                      <div key={e.id} className="rounded-md border p-3 bg-muted/20">
+                        <p className="text-xs text-muted-foreground">
+                          {e.editedByName ?? `#${e.editedBy}`} ·{" "}
+                          {e.editedAt ? new Date(e.editedAt as any).toLocaleString("pt-PT") : ""}
+                        </p>
+                        <p className="text-sm mt-1">
+                          <span className="text-muted-foreground">De:</span> {e.oldTitle}
+                        </p>
+                        <p className="text-sm">
+                          <span className="text-muted-foreground">Para:</span> {e.newTitle}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </ScrollArea>
+
+          <SheetFooter className="p-4 border-t gap-2 shrink-0 flex-row sm:justify-end bg-muted/20">
+            <Button type="button" variant="outline" onClick={() => setEditOpenId(null)}>
+              Fechar
+            </Button>
+            {currentEditRow?.status === "pending" ? (
+              <Button
+                type="button"
+                disabled={editMutation.isPending || editTitle.trim().length < 3 || editBody.trim().length < 10}
+                onClick={() =>
+                  editMutation.mutate({ id: editOpenId as number, title: editTitle.trim(), body: editBody.trim() })
+                }
+              >
+                {editMutation.isPending ? "A guardar…" : "Guardar edição"}
+              </Button>
+            ) : null}
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
 
       <AlertDialog open={!!reviewOpen} onOpenChange={(o) => !o && setReviewOpen(null)}>
         <AlertDialogContent>
