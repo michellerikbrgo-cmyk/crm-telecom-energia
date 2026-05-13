@@ -1,4 +1,5 @@
-import { COOKIE_NAME } from "@shared/const";
+import { BETA_COMPLETED_RETENTION_DAYS, COOKIE_NAME } from "@shared/const";
+import { betaPurgeDeadlineMs } from "@shared/betaRetention";
 import { mergeSaleContractDossier, parseSaleContractDossier, SALE_CONTRACT_DOSSIER_FIELDS } from "@shared/saleContractDossier";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -29,7 +30,7 @@ import {
   featureSuggestionEdits,
 } from "../drizzle/schema";
 import { alias } from "drizzle-orm/mysql-core";
-import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, ne, type SQL } from "drizzle-orm";
+import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, isNotNull, ne, type SQL } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
 import { detectImageMimeFromBuffer } from "./_core/imageMagic";
 import {
@@ -193,6 +194,34 @@ function canReviewBetaSuggestions(user: unknown): boolean {
   return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
 }
 
+async function purgeStaleCompletedBetaSuggestions(db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
+  try {
+    const olderThan = sql`DATE_SUB(NOW(), INTERVAL ${sql.raw(String(BETA_COMPLETED_RETENTION_DAYS))} DAY)`;
+    const staleIds = await db
+      .select({ id: featureSuggestions.id })
+      .from(featureSuggestions)
+      .where(
+        or(
+          and(isNotNull(featureSuggestions.completedAt), lt(featureSuggestions.completedAt, olderThan)),
+          and(
+            eq(featureSuggestions.status, "completed"),
+            isNull(featureSuggestions.completedAt),
+            lt(featureSuggestions.updatedAt, olderThan),
+          ),
+        ),
+      );
+    const ids = staleIds.map((r) => r.id);
+    if (ids.length === 0) return;
+    await db.delete(featureSuggestionEdits).where(inArray(featureSuggestionEdits.suggestionId, ids));
+    await db.delete(featureSuggestions).where(inArray(featureSuggestions.id, ids));
+    console.warn(
+      `[Beta] Auto-removidas ${ids.length} sugestão(ões) concluídas há mais de ${BETA_COMPLETED_RETENTION_DAYS} dias.`,
+    );
+  } catch (e) {
+    console.warn("[purgeStaleCompletedBetaSuggestions]", e);
+  }
+}
+
 function assertSuggestionReviewableByUser(
   row: { tenantId?: number | null },
   user: { id?: number; tenantId?: number | null; crmRole?: string; isSuperAdmin?: boolean },
@@ -308,12 +337,19 @@ async function assertSalePipelineAccessForSale(
   }
 }
 
-function assertEntityTenant(row: { tenantId?: number | null }, user: any, label = "Registo") {
+function assertEntityTenant(row: { tenantId?: number | null; companyId?: number | null }, user: any, label = "Registo") {
   if (isSuperAdminUser(user)) return;
   const ut = user?.tenantId;
   const rt = row?.tenantId;
   if (ut == null || rt == null || Number(rt) !== Number(ut)) {
     throw new Error(`${label} não pertence à esta empresa.`);
+  }
+  const crm = String(user?.crmRole || "");
+  if (crm === "coordenador") return;
+  const uc = user?.companyId != null ? Number(user.companyId) : null;
+  const rc = row?.companyId != null ? Number(row.companyId) : null;
+  if (uc != null && rc != null && uc !== rc) {
+    throw new Error(`${label} não pertence à sua sub-empresa.`);
   }
 }
 
@@ -584,6 +620,9 @@ export const appRouter = router({
         const manualAssign =
           user?.crmRole === "vendedor" || user?.crmRole === "cej" ? user.id : null;
 
+        const contactCompanyId =
+          isSuperAdminUser(user) ? null : (user?.companyId != null ? Number(user.companyId) : null);
+
         await db.insert(contacts).values({
           phone: input.phone,
           name: input.name || null,
@@ -596,6 +635,7 @@ export const appRouter = router({
           lastAssignedAt: manualAssign ? new Date() : null,
           status: "novo",
           tenantId: contactTenantId,
+          companyId: contactCompanyId,
         } as any);
 
         // Log audit
@@ -627,9 +667,15 @@ export const appRouter = router({
         }
 
         let assigneeTenantOk = true;
+        let assigneeCompanyId: number | null = null;
         if (!isSuperAdminUser(user) && input.assignTo) {
-          const a = await db.select({ tenantId: users.tenantId }).from(users).where(eq(users.id, input.assignTo)).limit(1);
+          const a = await db
+            .select({ tenantId: users.tenantId, companyId: users.companyId })
+            .from(users)
+            .where(eq(users.id, input.assignTo))
+            .limit(1);
           assigneeTenantOk = !!a[0] && Number(a[0].tenantId) === Number(user.tenantId);
+          assigneeCompanyId = a[0]?.companyId != null ? Number(a[0].companyId) : null;
         }
         if (!assigneeTenantOk) throw new Error("O vendedor de destino não pertence à mesma empresa.");
 
@@ -639,6 +685,15 @@ export const appRouter = router({
             throw new Error("Só pode atribuir listas a membros da sua equipa.");
           }
         }
+
+        const bulkCompanyId =
+          isSuperAdminUser(user)
+            ? null
+            : input.assignTo && assigneeCompanyId != null
+              ? assigneeCompanyId
+              : user?.companyId != null
+                ? Number(user.companyId)
+                : null;
 
         const values = input.phones.map((phone, i) => ({
           phone,
@@ -651,6 +706,7 @@ export const appRouter = router({
           assignedTo: input.assignTo || null,
           lastAssignedAt: input.assignTo ? new Date() : null,
           tenantId: contactTenantId,
+          companyId: bulkCompanyId,
         }));
 
         // Insert in batches of 500 to avoid query limits
@@ -1676,6 +1732,7 @@ Regras:
           rankingPosition: null as number | null,
         };
       }
+      await purgeStaleCompletedBetaSuggestions(db);
       const user = ctx.user as any;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -2340,12 +2397,13 @@ Regras:
       const db = await getDb();
       if (!db) return [];
       const user = ctx.user as any;
-      return await db
+      const mineRows = await db
         .select({
           id: featureSuggestions.id,
           title: featureSuggestions.title,
           body: featureSuggestions.body,
           status: featureSuggestions.status,
+          completedAt: featureSuggestions.completedAt,
           createdAt: featureSuggestions.createdAt,
           reviewedAt: featureSuggestions.reviewedAt,
           reviewNote: featureSuggestions.reviewNote,
@@ -2355,18 +2413,24 @@ Regras:
         .where(eq(featureSuggestions.authorId, user.id))
         .orderBy(desc(featureSuggestions.createdAt))
         .limit(100);
+
+      return mineRows.map((r) => {
+        const purgeMs = betaPurgeDeadlineMs({
+          status: r.status,
+          completedAt: r.completedAt,
+          updatedAt: r.updatedAt,
+        });
+        return {
+          ...r,
+          purgeAt: purgeMs != null ? new Date(purgeMs).toISOString() : null,
+        };
+      });
     }),
 
-    listPending: protectedProcedure.query(async ({ ctx }) => {
-      if (!canReviewBetaSuggestions(ctx.user)) return [];
+    listPending: protectedProcedure.query(async () => {
       const db = await getDb();
       if (!db) return [];
-      const user = ctx.user as any;
-      const parts: SQL[] = [eq(featureSuggestions.status, "pending")];
-      if (!isSuperAdminUser(user)) {
-        if (user.tenantId == null) return [];
-        parts.push(eq(featureSuggestions.tenantId, user.tenantId));
-      }
+      /** Todas as empresas — evitar ideias duplicadas e dar contexto global. */
       const rows = await db
         .select({
           id: featureSuggestions.id,
@@ -2379,21 +2443,35 @@ Regras:
         })
         .from(featureSuggestions)
         .leftJoin(users, eq(featureSuggestions.authorId, users.id))
-        .where(and(...parts))
+        .where(eq(featureSuggestions.status, "pending"))
         .orderBy(desc(featureSuggestions.createdAt))
-        .limit(200);
-      return rows;
+        .limit(500);
+
+      const tenantIds = Array.from(
+        new Set(rows.map((r) => r.tenantId).filter((x): x is number => x != null)),
+      );
+      let tenantLabels: Record<number, string> = {};
+      if (tenantIds.length) {
+        const tr = await db
+          .select({ id: users.id, name: users.name })
+          .from(users)
+          .where(inArray(users.id, tenantIds));
+        tenantLabels = Object.fromEntries(tr.map((t) => [t.id, t.name?.trim() || `Empresa #${t.id}`]));
+      }
+
+      return rows.map((r) => ({
+        ...r,
+        tenantLabel:
+          r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
+      }));
     }),
 
-    listAccepted: protectedProcedure.query(async ({ ctx }) => {
+    listAccepted: protectedProcedure.query(async () => {
       const db = await getDb();
       if (!db) return [];
-      const user = ctx.user as any;
+      await purgeStaleCompletedBetaSuggestions(db);
+      /* Roadmap global (todas as empresas): aligned com visibilidade Beta para evitar duplicar ideias. */
       const parts: SQL[] = [inArray(featureSuggestions.status, ["accepted", "completed"] as any)];
-      if (!isSuperAdminUser(user)) {
-        if (user.tenantId == null) return [];
-        parts.push(eq(featureSuggestions.tenantId, user.tenantId));
-      }
       const rows = await db
         .select({
           id: featureSuggestions.id,
@@ -2403,6 +2481,8 @@ Regras:
           status: featureSuggestions.status,
           createdAt: featureSuggestions.createdAt,
           reviewedAt: featureSuggestions.reviewedAt,
+          completedAt: featureSuggestions.completedAt,
+          updatedAt: featureSuggestions.updatedAt,
           authorName: users.name,
         })
         .from(featureSuggestions)
@@ -2423,18 +2503,28 @@ Regras:
         tenantLabels = Object.fromEntries(tr.map((t) => [t.id, t.name?.trim() || `Empresa #${t.id}`]));
       }
 
-      return rows.map((r) => ({
-        id: r.id,
-        tenantId: r.tenantId,
-        tenantLabel:
-          r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
-        title: r.title,
-        body: r.body,
-        status: r.status,
-        createdAt: r.createdAt,
-        acceptedAt: r.reviewedAt,
-        authorName: r.authorName,
-      }));
+      return rows.map((r) => {
+        const purgeMs = betaPurgeDeadlineMs({
+          status: r.status,
+          completedAt: r.completedAt,
+          updatedAt: r.updatedAt,
+        });
+        return {
+          id: r.id,
+          tenantId: r.tenantId,
+          tenantLabel:
+            r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
+          title: r.title,
+          body: r.body,
+          status: r.status,
+          createdAt: r.createdAt,
+          acceptedAt: r.reviewedAt,
+          completedAt: r.completedAt,
+          /** ISO UTC — remoção automática após BETA_COMPLETED_RETENTION_DIAS a partir da conclusão. */
+          purgeAt: purgeMs != null ? new Date(purgeMs).toISOString() : null,
+          authorName: r.authorName,
+        };
+      });
     }),
 
     listEdits: protectedProcedure
@@ -2533,12 +2623,25 @@ Regras:
         const [row] = await db.select().from(featureSuggestions).where(eq(featureSuggestions.id, input.id)).limit(1);
         if (!row) throw new Error("Sugestão não encontrada.");
         assertSuggestionReviewableByUser(row as any, user);
+        // Legacy: ENUM completed (migração 0022); actual: accepted + completedAt (migração 0023).
+        if (row.status === "completed") return { success: true };
+        if (row.completedAt != null) return { success: true };
         if (row.status !== "accepted") throw new Error("Só pode concluir sugestões aceites.");
 
-        await db.update(featureSuggestions).set({
-          status: "completed",
-          updatedAt: new Date(),
-        } as any).where(eq(featureSuggestions.id, input.id));
+        try {
+          await db
+            .update(featureSuggestions)
+            .set({ completedAt: new Date() } as any)
+            .where(eq(featureSuggestions.id, input.id));
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("completedAt") || msg.includes("Unknown column")) {
+            throw new Error(
+              "Falta actualizar a base de dados (coluna completedAt). No servidor execute: pnpm exec drizzle-kit migrate",
+            );
+          }
+          throw e;
+        }
 
         await db.insert(auditLogs).values({
           userId: user.id,
@@ -2547,6 +2650,8 @@ Regras:
           entityId: input.id,
           details: `${row.title}`.slice(0, 255),
         });
+
+        await purgeStaleCompletedBetaSuggestions(db);
 
         return { success: true };
       }),
@@ -2563,7 +2668,8 @@ Regras:
         const canReview = canReviewBetaSuggestions(user);
         const isAuthor = user?.id != null && Number(row.authorId) === Number(user.id);
 
-        if (row.status === "completed") {
+        const isWorkflowDone = row.status === "completed" || row.completedAt != null;
+        if (isWorkflowDone) {
           if (!canReview) throw new Error("Só Coordenador/Super Admin pode excluir sugestões concluídas.");
           assertSuggestionReviewableByUser(row as any, user);
         } else if (row.status === "pending" || row.status === "rejected") {

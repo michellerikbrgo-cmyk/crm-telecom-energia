@@ -3,8 +3,8 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getDb } from "./db";
-import { users } from "../drizzle/schema";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { companies, teams, users } from "../drizzle/schema";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
 import { isSuperAdminUser, resolveUserTeamScopeId, whereUsersForUser } from "./tenantScope";
 import bcrypt from "bcryptjs";
@@ -16,6 +16,11 @@ import {
   getClientUserAgent,
   lookupGeoLabel,
 } from "./_core/clientMeta";
+import {
+  assertCompanyInCoordinatorTree,
+  assertUserIsSubCompanyTeamLeader,
+  getRootCompanyForCoordinator,
+} from "./companyHierarchy";
 
 /** MySQL às vezes devolve 0/1 em vez de boolean. */
 function truthyFlag(v: unknown): boolean {
@@ -141,6 +146,12 @@ export const authLocalRouter = router({
         crmRole: z.enum(["vendedor", "cej", "ce", "coordenador"]),
         /** Obrigatório quando Super Admin cria não-coordenador (= empresa / tenant destino). */
         tenantCoordinatorUserId: z.number().int().positive().optional(),
+        /** Super Admin ao criar coordenador: nome da empresa raiz (opcional; usa o nome do utilizador). */
+        rootCompanyName: z.string().min(1).max(255).optional(),
+        /** Coordenador ao criar CE: nome da sub-empresa (opcional; gera a partir do nome). */
+        subCompanyName: z.string().min(1).max(255).optional(),
+        /** Super Admin: ao criar vendedor/CEJ/CE, opcionalmente fixar `company_id` (sub-empresa ou raiz) sob o coordenador escolhido. */
+        targetCompanyId: z.number().int().positive().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -149,6 +160,7 @@ export const authLocalRouter = router({
 
       const currentUser = ctx.user as Record<string, unknown>;
       const isSa = truthyFlag(currentUser.isSuperAdmin);
+      const currentRole = String(currentUser.crmRole || "");
 
       if (isSa) {
         // Super admin cria qualquer papel.
@@ -156,14 +168,13 @@ export const authLocalRouter = router({
         assertHierarchyCreatesBelowOnly(currentUser, input.crmRole);
       }
 
-      // --- Tenant (empresa): ID do utilizador Coordenador dono ---
       let tenantToAssign: number | null = null;
 
       if (input.crmRole === "coordenador") {
         if (!isSa) {
           throw new Error("Apenas o Super Admin pode criar Coordenadores (nova empresa no sistema).");
         }
-        tenantToAssign = null as any;
+        tenantToAssign = null;
       } else if (isSa) {
         const tid = input.tenantCoordinatorUserId;
         if (!tid) {
@@ -178,9 +189,8 @@ export const authLocalRouter = router({
           .limit(1);
         if (!coord.length) throw new Error("Empresa inválida: esse utilizador não é Coordenador.");
         tenantToAssign = tid;
-      } else if (String(currentUser.crmRole || "") === "coordenador") {
-        const selfId = Number(currentUser.id);
-        tenantToAssign = selfId;
+      } else if (currentRole === "coordenador") {
+        tenantToAssign = Number(currentUser.id);
       } else {
         const ct = currentUser.tenantId;
         if (ct == null || Number.isNaN(Number(ct))) {
@@ -189,37 +199,138 @@ export const authLocalRouter = router({
         tenantToAssign = Number(ct);
       }
 
-      const existing = await db.select().from(users)
-        .where(eq(users.email, input.email))
-        .limit(1);
-
+      const existing = await db.select().from(users).where(eq(users.email, input.email)).limit(1);
       if (existing.length > 0) {
         throw new Error("Este e-mail já está registado");
       }
 
       const hashedPassword = await bcrypt.hash(input.password, 10);
-
       const openId = `local_${randomBytes(18).toString("hex")}`;
 
-      await db.insert(users).values({
-        openId,
-        name: input.name,
-        email: input.email,
-        password: hashedPassword,
-        loginMethod: "local",
-        role: input.crmRole === "coordenador" ? "admin" : "user",
-        crmRole: input.crmRole,
-        tenantId: input.crmRole === "coordenador" ? null : tenantToAssign,
-      } as any);
+      const isCeSubCompanyFlow =
+        input.crmRole === "ce" && tenantToAssign != null && (isSa || currentRole === "coordenador");
 
-      const row = await db.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
+      const isMemberCreator =
+        !isSa &&
+        (currentRole === "ce" || currentRole === "cej") &&
+        (input.crmRole === "vendedor" || (currentRole === "ce" && input.crmRole === "cej"));
 
-      const newUserId = row[0]?.id;
-      if (!newUserId) throw new Error("Falha ao criar utilizador");
+      if (isCeSubCompanyFlow) {
+        const coordId = tenantToAssign!;
+        await db.transaction(async (tx) => {
+          const root = await getRootCompanyForCoordinator(tx, coordId);
+          if (!root?.id) {
+            throw new Error(
+              "Empresa raiz em falta. Execute migrações (`pnpm exec drizzle-kit migrate`) ou contacte o suporte.",
+            );
+          }
+          const internalKey = `__new__${randomBytes(10).toString("hex")}`;
+          const displayName = (
+            input.subCompanyName?.trim() ||
+            `Equipe ${input.name.trim().slice(0, 80)}`
+          ).slice(0, 255);
+          await tx.insert(companies).values({
+            name: internalKey,
+            coordinatorUserId: null,
+            parentCompanyId: root.id,
+          } as any);
+          const [subRow] = await tx
+            .select({ id: companies.id })
+            .from(companies)
+            .where(eq(companies.name, internalKey))
+            .limit(1);
+          const subId = subRow?.id;
+          if (!subId) throw new Error("Falha ao criar sub-empresa.");
 
-      if (input.crmRole === "coordenador") {
-        await db.update(users).set({ tenantId: newUserId }).where(eq(users.id, newUserId));
+          await tx.insert(users).values({
+            openId,
+            name: input.name,
+            email: input.email,
+            password: hashedPassword,
+            loginMethod: "local",
+            role: "user",
+            crmRole: "ce",
+            tenantId: coordId,
+            companyId: subId,
+          } as any);
+
+          const [newUser] = await tx.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
+          const newUserId = newUser?.id;
+          if (!newUserId) throw new Error("Falha ao criar utilizador.");
+
+          await tx.insert(teams).values({
+            name: displayName,
+            leaderId: newUserId,
+            tenantId: coordId,
+            companyId: subId,
+          } as any);
+          const [tm] = await tx
+            .select({ id: teams.id })
+            .from(teams)
+            .where(eq(teams.leaderId, newUserId))
+            .orderBy(desc(teams.id))
+            .limit(1);
+          if (tm?.id) {
+            await tx.update(users).set({ teamId: tm.id } as any).where(eq(users.id, newUserId));
+          }
+          await tx.update(companies).set({ name: displayName } as any).where(eq(companies.id, subId));
+        });
+        return { success: true };
       }
+
+      let companyIdToAssign: number | null = null;
+
+      if (isMemberCreator) {
+        companyIdToAssign = await assertUserIsSubCompanyTeamLeader(db, Number(currentUser.id));
+      } else if (tenantToAssign != null && ["vendedor", "cej", "ce"].includes(input.crmRole)) {
+        if (isSa && input.targetCompanyId != null) {
+          await assertCompanyInCoordinatorTree(db, tenantToAssign, input.targetCompanyId);
+          companyIdToAssign = input.targetCompanyId;
+        } else {
+          const root = await getRootCompanyForCoordinator(db, tenantToAssign);
+          companyIdToAssign = root?.id ?? null;
+        }
+      }
+
+      await db.transaction(async (tx) => {
+        await tx.insert(users).values({
+          openId,
+          name: input.name,
+          email: input.email,
+          password: hashedPassword,
+          loginMethod: "local",
+          role: input.crmRole === "coordenador" ? "admin" : "user",
+          crmRole: input.crmRole,
+          tenantId: input.crmRole === "coordenador" ? null : tenantToAssign,
+          companyId: input.crmRole === "coordenador" ? null : companyIdToAssign,
+        } as any);
+
+        const row = await tx.select({ id: users.id }).from(users).where(eq(users.email, input.email)).limit(1);
+        const newUserId = row[0]?.id;
+        if (!newUserId) throw new Error("Falha ao criar utilizador");
+
+        if (input.crmRole === "coordenador") {
+          await tx.update(users).set({ tenantId: newUserId }).where(eq(users.id, newUserId));
+          const rootName = (
+            input.rootCompanyName?.trim() ||
+            input.name.trim() ||
+            `Empresa #${newUserId}`
+          ).slice(0, 255);
+          await tx.insert(companies).values({
+            name: rootName,
+            coordinatorUserId: newUserId,
+            parentCompanyId: null,
+          } as any);
+          const [co] = await tx
+            .select({ id: companies.id })
+            .from(companies)
+            .where(eq(companies.coordinatorUserId, newUserId))
+            .limit(1);
+          if (co?.id) {
+            await tx.update(users).set({ companyId: co.id } as any).where(eq(users.id, newUserId));
+          }
+        }
+      });
 
       return { success: true };
     }),
@@ -243,6 +354,7 @@ export const authLocalRouter = router({
       isSuperAdmin: (users as any).isSuperAdmin,
       isOnline: users.isOnline,
       createdAt: users.createdAt,
+      companyId: users.companyId,
       companyName: coordinator.name,
     };
 
@@ -284,15 +396,19 @@ export const authLocalRouter = router({
         crmRole: "ce",
       });
       if (scopeId == null) return [];
+      const myCcid = (currentUser as { companyId?: number | null }).companyId;
+      const companyPart =
+        myCcid != null && !Number.isNaN(Number(myCcid)) ? eq(users.companyId, Number(myCcid)) : undefined;
       const hierarchyCond = or(
         eq(users.id, uid),
         and(eq(users.teamId, scopeId), inArray(users.crmRole, ["vendedor", "cej"])),
       );
+      const parts = [eq(users.tenantId, tenantIdNum), hierarchyCond, companyPart].filter(Boolean) as any[];
       return await db
         .select(baseSelect)
         .from(users)
         .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
-        .where(and(eq(users.tenantId, tenantIdNum), hierarchyCond));
+        .where(and(...parts));
     }
 
     if (role === "cej") {
@@ -302,15 +418,19 @@ export const authLocalRouter = router({
         crmRole: "cej",
       });
       if (scopeId == null) return [];
+      const myCcid = (currentUser as { companyId?: number | null }).companyId;
+      const companyPart =
+        myCcid != null && !Number.isNaN(Number(myCcid)) ? eq(users.companyId, Number(myCcid)) : undefined;
       const hierarchyCond = or(
         eq(users.id, uid),
         and(eq(users.teamId, scopeId), eq(users.crmRole, "vendedor")),
       );
+      const parts = [eq(users.tenantId, tenantIdNum), hierarchyCond, companyPart].filter(Boolean) as any[];
       return await db
         .select(baseSelect)
         .from(users)
         .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
-        .where(and(eq(users.tenantId, tenantIdNum), hierarchyCond));
+        .where(and(...parts));
     }
 
     return [];

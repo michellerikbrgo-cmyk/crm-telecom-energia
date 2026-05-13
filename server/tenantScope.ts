@@ -47,6 +47,22 @@ export function contactBelongsToUserTenant(
 
 /** Condição WHERE para contactos conforme o utilizador. Super admin: sem filtro extra. */
 export function whereContactsForUser(u: Record<string, unknown> | null | undefined): SQL | undefined {
+  if (isSuperAdminUser(u)) return undefined;
+  const crm = String((u as any).crmRole || "");
+  const tenantId = (u as any).tenantId != null ? Number((u as any).tenantId) : null;
+  const companyId = (u as any).companyId != null ? Number((u as any).companyId) : null;
+
+  if (crm === "coordenador" && tenantId != null) {
+    return eq(contacts.tenantId, tenantId);
+  }
+
+  if (["ce", "cej", "vendedor"].includes(crm) && tenantId != null) {
+    if (companyId != null) {
+      return and(eq(contacts.tenantId, tenantId), eq(contacts.companyId, companyId));
+    }
+    return eq(contacts.tenantId, tenantId);
+  }
+
   const scope = getScopedTenantCoordinatorUserId(u as any);
   if (scope === "ALL") return undefined;
   if (scope === null) return sql`1=0`;
@@ -55,9 +71,20 @@ export function whereContactsForUser(u: Record<string, unknown> | null | undefin
 
 /** Condição WHERE para linha de utilizadores (lista / supervisão). */
 export function whereUsersForUser(u: Record<string, unknown> | null | undefined): SQL | undefined {
+  if (isSuperAdminUser(u)) return undefined;
+  const crm = String((u as any).crmRole || "");
   const scope = getScopedTenantCoordinatorUserId(u as any);
   if (scope === "ALL") return undefined;
   if (scope === null) return sql`1=0`;
+
+  if (crm === "coordenador") {
+    return eq(users.tenantId, scope);
+  }
+
+  const companyId = (u as any).companyId != null ? Number((u as any).companyId) : null;
+  if (companyId != null && ["ce", "cej", "vendedor"].includes(crm)) {
+    return and(eq(users.tenantId, scope), eq(users.companyId, companyId));
+  }
   return eq(users.tenantId, scope);
 }
 

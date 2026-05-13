@@ -162,6 +162,20 @@
       "when": 1778250014000,
       "tag": "0022_beta_suggestions_edits_and_completed",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "5",
+      "when": 1778250015000,
+      "tag": "0023_feature_suggestions_completed_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "5",
+      "when": 1778250016000,
+      "tag": "0024_companies_hierarchy",
+      "breakpoints": true
     }
   ]
 }

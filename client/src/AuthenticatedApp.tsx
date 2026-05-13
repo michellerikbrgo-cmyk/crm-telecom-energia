@@ -25,6 +25,7 @@ const Supervisao = lazy(() => import("@/pages/Supervisao"));
 const ListaNegra = lazy(() => import("@/pages/ListaNegra"));
 const Acompanhamento = lazy(() => import("@/pages/Acompanhamento"));
 const Beta = lazy(() => import("@/pages/Beta"));
+const BetaRevisao = lazy(() => import("@/pages/BetaRevisao"));
 const PlanosEmpresas = lazy(() => import("@/pages/PlanosEmpresas"));
 
 /** Carregado só nas rotas autenticadas — não entra no chunk do /login */
@@ -35,6 +36,7 @@ export default function AuthenticatedApp() {
         <Suspense fallback={<PageLoadFallback />}>
           <Switch>
             <Route path="/painel" component={Home} />
+            <Route path="/beta/revisao" component={BetaRevisao} />
             <Route path="/beta" component={Beta} />
             <Route path="/acompanhamento" component={Acompanhamento} />
             <Route path="/contactos" component={Contactos} />

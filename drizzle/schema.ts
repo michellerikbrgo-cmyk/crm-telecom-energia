@@ -13,6 +13,8 @@ export const users = mysqlTable("users", {
   isSuperAdmin: boolean("isSuperAdmin").default(false).notNull(),
   /** ID do utilizador Coordenador dono do tenant (empresa). Super admin: null. Coordenador: = próprio users.id. */
   tenantId: int("tenantId"),
+  /** Empresa ou sub-empresa (hierarquia `companies`). Null = legado / Super Admin. */
+  companyId: int("companyId"),
   teamId: int("teamId"),
   isOnline: boolean("isOnline").default(false).notNull(),
   dialerState: mysqlEnum("dialerState", ["idle", "ready", "in_call", "wrap_up"]).default("idle").notNull(),
@@ -37,6 +39,19 @@ export const users = mysqlTable("users", {
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+// ============ COMPANIES (empresa > sub-empresa) ============
+/** Empresa raiz: `parentCompanyId` null e `coordinatorUserId` = id do coordenador. Sub-empresa: `parentCompanyId` = id da raiz. */
+export const companies = mysqlTable("companies", {
+  id: int("id").autoincrement().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  coordinatorUserId: int("coordinatorUserId"),
+  parentCompanyId: int("parentCompanyId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type Company = typeof companies.$inferSelect;
+export type InsertCompany = typeof companies.$inferInsert;
 
 // ============ APP SETTINGS ============
 export const appSettings = mysqlTable("appSettings", {
@@ -90,6 +105,8 @@ export const teams = mysqlTable("teams", {
   contactEmail: varchar("contactEmail", { length: 320 }),
   /** Dono do tenant (coordenador user id) para isolar equipas por empresa. */
   tenantId: int("tenantId"),
+  /** Sub-empresa (equipa) quando criada pelo fluxo hierárquico. */
+  companyId: int("companyId"),
   /** Meta diária de chamadas para a equipa (dashboard); null = usar valor por defeito da app (80). */
   dailyCallsGoal: int("dailyCallsGoal"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -100,6 +117,8 @@ export const contacts = mysqlTable("contacts", {
   id: int("id").autoincrement().primaryKey(),
   /** ID do coordenador dono dos dados (mesmo valor que users.tenantId da equipa). */
   tenantId: int("tenantId"),
+  /** Sub-empresa / equipa para isolamento entre chefes (ver `companies`). */
+  companyId: int("companyId"),
   phone: varchar("phone", { length: 20 }).notNull(),
   name: varchar("name", { length: 255 }),
   email: varchar("email", { length: 320 }),
@@ -276,6 +295,8 @@ export const featureSuggestions = mysqlTable("featureSuggestions", {
   reviewedBy: int("reviewedBy"),
   reviewedAt: timestamp("reviewedAt"),
   reviewNote: text("reviewNote"),
+  /** Data em que foi marcada como concluída (Beta); não altera o ENUM quando a BD não suporta `completed`. */
+  completedAt: timestamp("completedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });

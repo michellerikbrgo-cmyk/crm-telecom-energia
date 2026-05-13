@@ -32,6 +32,7 @@ import { useLocation } from "wouter";
 import atualizacoesMd from "@shared/ATUALIZACOES.md?raw";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BetaPurgeCountdown } from "@/components/BetaPurgeCountdown";
 import { Badge } from "@/components/ui/badge";
 
 function formatReleaseAt(iso: string) {
@@ -526,8 +527,8 @@ export default function SuperAdmin() {
                 Próxima versão — sugestões aceites (Beta)
               </CardTitle>
               <p className="text-sm text-muted-foreground font-normal">
-                Lista consolidada de ideias já <strong>aceites</strong> (coordenadores por empresa). As mesmas entradas
-                aparecem filtradas por empresa na página <code className="text-xs">/beta</code>.
+                Lista consolidada de ideias já <strong>aceites</strong>. O mesmo roadmap (todas as empresas) aparece na
+                página <code className="text-xs">/beta</code>.
               </p>
             </CardHeader>
             <CardContent>
@@ -553,6 +554,11 @@ export default function SuperAdmin() {
                             ? ` · Aceite em ${new Date(s.acceptedAt).toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" })}`
                             : ""}
                         </p>
+                        {s.purgeAt ? (
+                          <p className="text-[11px] mt-2">
+                            <BetaPurgeCountdown purgeAtIso={s.purgeAt} />
+                          </p>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
