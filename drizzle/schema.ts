@@ -13,6 +13,8 @@ export const users = mysqlTable("users", {
   isSuperAdmin: boolean("isSuperAdmin").default(false).notNull(),
   /** ID do utilizador Coordenador dono do tenant (empresa). Super admin: null. Coordenador: = próprio users.id. */
   tenantId: int("tenantId"),
+  /** Empresa ou sub-empresa (hierarquia `companies`). Null = legado / Super Admin. */
+  companyId: int("companyId"),
   teamId: int("teamId"),
   isOnline: boolean("isOnline").default(false).notNull(),
   dialerState: mysqlEnum("dialerState", ["idle", "ready", "in_call", "wrap_up"]).default("idle").notNull(),
@@ -37,6 +39,19 @@ export const users = mysqlTable("users", {
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
+
+// ============ COMPANIES (empresa > sub-empresa) ============
+/** Empresa raiz: `parentCompanyId` null e `coordinatorUserId` = id do coordenador. Sub-empresa: `parentCompanyId` = id da raiz. */
+export const companies = mysqlTable("companies", {
+  id: int("id").autoincrement().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  coordinatorUserId: int("coordinatorUserId"),
+  parentCompanyId: int("parentCompanyId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type Company = typeof companies.$inferSelect;
+export type InsertCompany = typeof companies.$inferInsert;
 
 // ============ APP SETTINGS ============
 export const appSettings = mysqlTable("appSettings", {
@@ -90,6 +105,8 @@ export const teams = mysqlTable("teams", {
   contactEmail: varchar("contactEmail", { length: 320 }),
   /** Dono do tenant (coordenador user id) para isolar equipas por empresa. */
   tenantId: int("tenantId"),
+  /** Sub-empresa (equipa) quando criada pelo fluxo hierárquico. */
+  companyId: int("companyId"),
   /** Meta diária de chamadas para a equipa (dashboard); null = usar valor por defeito da app (80). */
   dailyCallsGoal: int("dailyCallsGoal"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -100,6 +117,8 @@ export const contacts = mysqlTable("contacts", {
   id: int("id").autoincrement().primaryKey(),
   /** ID do coordenador dono dos dados (mesmo valor que users.tenantId da equipa). */
   tenantId: int("tenantId"),
+  /** Sub-empresa / equipa para isolamento entre chefes (ver `companies`). */
+  companyId: int("companyId"),
   phone: varchar("phone", { length: 20 }).notNull(),
   name: varchar("name", { length: 255 }),
   email: varchar("email", { length: 320 }),
@@ -119,6 +138,8 @@ export const contacts = mysqlTable("contacts", {
   campaignOffered: varchar("campaignOffered", { length: 255 }),
   offerValue: varchar("offerValue", { length: 100 }),
   listName: varchar("listName", { length: 255 }),
+  /** manual = formulário Contactos (48h exclusividade para outros vendedores); bulk = importação; import = legado. */
+  addedSource: mysqlEnum("addedSource", ["manual", "bulk", "import", "system"]).default("import").notNull(),
   isLead: boolean("isLead").default(false).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -270,15 +291,31 @@ export const featureSuggestions = mysqlTable("featureSuggestions", {
   authorId: int("authorId").notNull(),
   title: varchar("title", { length: 255 }).notNull(),
   body: text("body").notNull(),
-  status: mysqlEnum("status", ["pending", "accepted", "rejected"]).default("pending").notNull(),
+  status: mysqlEnum("status", ["pending", "accepted", "rejected", "completed"]).default("pending").notNull(),
   reviewedBy: int("reviewedBy"),
   reviewedAt: timestamp("reviewedAt"),
   reviewNote: text("reviewNote"),
+  /** Data em que foi marcada como concluída (Beta); não altera o ENUM quando a BD não suporta `completed`. */
+  completedAt: timestamp("completedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
 export type FeatureSuggestion = typeof featureSuggestions.$inferSelect;
+
+// ============ FEATURE SUGGESTION EDITS (audit de edições) ============
+export const featureSuggestionEdits = mysqlTable("featureSuggestionEdits", {
+  id: int("id").autoincrement().primaryKey(),
+  suggestionId: int("suggestionId").notNull(),
+  editedBy: int("editedBy").notNull(),
+  oldTitle: varchar("oldTitle", { length: 255 }).notNull(),
+  oldBody: text("oldBody").notNull(),
+  newTitle: varchar("newTitle", { length: 255 }).notNull(),
+  newBody: text("newBody").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type FeatureSuggestionEdit = typeof featureSuggestionEdits.$inferSelect;
 
 // ============ SALES ============
 export const sales = mysqlTable("sales", {
@@ -291,6 +328,8 @@ export const sales = mysqlTable("sales", {
   status: mysqlEnum("status", ["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).default("aguarda_instalacao").notNull(),
   cancelReason: text("cancelReason"),
   installationDate: timestamp("installationDate"),
+  /** JSON (texto): campos opcionais da ficha de contrato — ver shared/saleContractDossier.ts */
+  saleContractDossier: text("saleContractDossier"),
   closedAt: timestamp("closedAt").defaultNow().notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),

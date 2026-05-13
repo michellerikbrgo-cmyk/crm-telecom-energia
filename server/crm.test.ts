@@ -93,10 +93,12 @@ describe("CRM Router Structure", () => {
     expect(appRouter._def.procedures).toHaveProperty("scripts.create");
   });
 
-  it("should have sales router with list, pipeline and create", () => {
+  it("should have sales router with list, pipeline, create, update and dossier", () => {
     expect(appRouter._def.procedures).toHaveProperty("sales.list");
     expect(appRouter._def.procedures).toHaveProperty("sales.pipeline");
     expect(appRouter._def.procedures).toHaveProperty("sales.create");
+    expect(appRouter._def.procedures).toHaveProperty("sales.update");
+    expect(appRouter._def.procedures).toHaveProperty("sales.saveContractDossier");
   });
 
   it("should have dashboard router with stats", () => {

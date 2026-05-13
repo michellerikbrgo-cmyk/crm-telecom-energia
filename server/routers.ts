@@ -1,4 +1,6 @@
-import { COOKIE_NAME } from "@shared/const";
+import { BETA_COMPLETED_RETENTION_DAYS, COOKIE_NAME } from "@shared/const";
+import { betaPurgeDeadlineMs } from "@shared/betaRetention";
+import { mergeSaleContractDossier, parseSaleContractDossier, SALE_CONTRACT_DOSSIER_FIELDS } from "@shared/saleContractDossier";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router, superAdminProcedure } from "./_core/trpc";
@@ -25,8 +27,10 @@ import {
   users,
   teams,
   featureSuggestions,
+  featureSuggestionEdits,
 } from "../drizzle/schema";
-import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, type SQL } from "drizzle-orm";
+import { alias } from "drizzle-orm/mysql-core";
+import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, isNotNull, ne, type SQL } from "drizzle-orm";
 import { invokeLLM } from "./_core/llm";
 import { detectImageMimeFromBuffer } from "./_core/imageMagic";
 import {
@@ -190,6 +194,34 @@ function canReviewBetaSuggestions(user: unknown): boolean {
   return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
 }
 
+async function purgeStaleCompletedBetaSuggestions(db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
+  try {
+    const olderThan = sql`DATE_SUB(NOW(), INTERVAL ${sql.raw(String(BETA_COMPLETED_RETENTION_DAYS))} DAY)`;
+    const staleIds = await db
+      .select({ id: featureSuggestions.id })
+      .from(featureSuggestions)
+      .where(
+        or(
+          and(isNotNull(featureSuggestions.completedAt), lt(featureSuggestions.completedAt, olderThan)),
+          and(
+            eq(featureSuggestions.status, "completed"),
+            isNull(featureSuggestions.completedAt),
+            lt(featureSuggestions.updatedAt, olderThan),
+          ),
+        ),
+      );
+    const ids = staleIds.map((r) => r.id);
+    if (ids.length === 0) return;
+    await db.delete(featureSuggestionEdits).where(inArray(featureSuggestionEdits.suggestionId, ids));
+    await db.delete(featureSuggestions).where(inArray(featureSuggestions.id, ids));
+    console.warn(
+      `[Beta] Auto-removidas ${ids.length} sugestão(ões) concluídas há mais de ${BETA_COMPLETED_RETENTION_DAYS} dias.`,
+    );
+  } catch (e) {
+    console.warn("[purgeStaleCompletedBetaSuggestions]", e);
+  }
+}
+
 function assertSuggestionReviewableByUser(
   row: { tenantId?: number | null },
   user: { id?: number; tenantId?: number | null; crmRole?: string; isSuperAdmin?: boolean },
@@ -202,6 +234,25 @@ function assertSuggestionReviewableByUser(
     return;
   }
   throw new Error("Sem permissão.");
+}
+
+function assertSuggestionEditableByUser(
+  row: { tenantId?: number | null; authorId?: number; status?: string },
+  user: { id?: number; tenantId?: number | null; crmRole?: string; isSuperAdmin?: boolean },
+) {
+  // Coordenador / Super Admin podem editar (com auditoria), dentro do âmbito.
+  if (isSuperAdminUser(user) || user?.crmRole === "coordenador") {
+    assertSuggestionReviewableByUser(row, user);
+    return;
+  }
+  // Autor pode editar, mas só dentro do seu tenant (evita leaks).
+  if (!user?.id || Number(row.authorId) !== Number(user.id)) {
+    throw new Error("Só o autor pode editar esta sugestão.");
+  }
+  // Para vendedor/chefes, usamos tenantId como ângulo de segurança.
+  if (row.tenantId == null || user.tenantId == null || Number(row.tenantId) !== Number(user.tenantId)) {
+    throw new Error("Esta sugestão não pertence à sua empresa.");
+  }
 }
 
 async function syncSaleInstallationCalendar(
@@ -234,6 +285,18 @@ async function syncSaleInstallationCalendar(
   } as any);
 }
 
+/** Contacto manual: outros vendedores não acedem nas primeiras 48h (coord/CE/CEJ/SA ignoram). */
+const MANUAL_EXCLUSIVE_HOURS = 48;
+
+function sqlVendedorBypassManualExclusive(c: typeof contacts, vendedorId: number): SQL {
+  return sql`(
+    ${c.addedSource} <> 'manual'
+    OR ${c.addedBy} IS NULL
+    OR ${c.addedBy} = ${vendedorId}
+    OR ${c.createdAt} <= DATE_SUB(NOW(), INTERVAL 48 HOUR)
+  )` as SQL;
+}
+
 async function assertContactAccessible(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   contactId: number,
@@ -244,14 +307,49 @@ async function assertContactAccessible(
   if (!contactBelongsToUserTenant(c as any, user) && !isSuperAdminUser(user)) {
     throw new Error("Contacto não pertence à sua empresa.");
   }
+  const src = (c as { addedSource?: string }).addedSource;
+  if (
+    user?.crmRole === "vendedor" &&
+    src === "manual" &&
+    c.addedBy != null &&
+    Number(c.addedBy) !== Number(user.id)
+  ) {
+    const createdAt = c.createdAt ? new Date(c.createdAt as Date).getTime() : 0;
+    if (Date.now() - createdAt < MANUAL_EXCLUSIVE_HOURS * 60 * 60 * 1000) {
+      throw new Error(
+        "Este número está em período exclusivo de 48h do vendedor que o adicionou manualmente.",
+      );
+    }
+  }
 }
 
-function assertEntityTenant(row: { tenantId?: number | null }, user: any, label = "Registo") {
+/** Venda só acessível se o contacto for da empresa e o vendedor da venda estiver no âmbito (equipa / tenant). */
+async function assertSalePipelineAccessForSale(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  sale: { contactId: number; vendedorId: number },
+  user: any,
+) {
+  await assertContactAccessible(db, sale.contactId, user);
+  const ids = await getSellerIdsForPipelineScope(db, user);
+  if (ids === "ALL") return;
+  if (!ids.includes(Number(sale.vendedorId))) {
+    throw new Error("Sem permissão para aceder a esta venda (fora da sua equipa).");
+  }
+}
+
+function assertEntityTenant(row: { tenantId?: number | null; companyId?: number | null }, user: any, label = "Registo") {
   if (isSuperAdminUser(user)) return;
   const ut = user?.tenantId;
   const rt = row?.tenantId;
   if (ut == null || rt == null || Number(rt) !== Number(ut)) {
     throw new Error(`${label} não pertence à esta empresa.`);
+  }
+  const crm = String(user?.crmRole || "");
+  if (crm === "coordenador") return;
+  const uc = user?.companyId != null ? Number(user.companyId) : null;
+  const rc = row?.companyId != null ? Number(row.companyId) : null;
+  if (uc != null && rc != null && uc !== rc) {
+    throw new Error(`${label} não pertence à sua sub-empresa.`);
   }
 }
 
@@ -452,6 +550,7 @@ export const appRouter = router({
 
         if (user?.crmRole === "vendedor") {
           conditions.push(eq(contacts.assignedTo, user.id));
+          conditions.push(sqlVendedorBypassManualExclusive(contacts, user.id));
         }
 
         const utid = user?.tenantId as number | undefined;
@@ -521,6 +620,9 @@ export const appRouter = router({
         const manualAssign =
           user?.crmRole === "vendedor" || user?.crmRole === "cej" ? user.id : null;
 
+        const contactCompanyId =
+          isSuperAdminUser(user) ? null : (user?.companyId != null ? Number(user.companyId) : null);
+
         await db.insert(contacts).values({
           phone: input.phone,
           name: input.name || null,
@@ -528,10 +630,12 @@ export const appRouter = router({
           origin: user?.crmRole === "ce" ? "Telemarketing" : input.origin,
           notes: input.notes || null,
           addedBy: user?.id,
+          addedSource: "manual",
           assignedTo: manualAssign,
           lastAssignedAt: manualAssign ? new Date() : null,
           status: "novo",
           tenantId: contactTenantId,
+          companyId: contactCompanyId,
         } as any);
 
         // Log audit
@@ -563,9 +667,15 @@ export const appRouter = router({
         }
 
         let assigneeTenantOk = true;
+        let assigneeCompanyId: number | null = null;
         if (!isSuperAdminUser(user) && input.assignTo) {
-          const a = await db.select({ tenantId: users.tenantId }).from(users).where(eq(users.id, input.assignTo)).limit(1);
+          const a = await db
+            .select({ tenantId: users.tenantId, companyId: users.companyId })
+            .from(users)
+            .where(eq(users.id, input.assignTo))
+            .limit(1);
           assigneeTenantOk = !!a[0] && Number(a[0].tenantId) === Number(user.tenantId);
+          assigneeCompanyId = a[0]?.companyId != null ? Number(a[0].companyId) : null;
         }
         if (!assigneeTenantOk) throw new Error("O vendedor de destino não pertence à mesma empresa.");
 
@@ -576,16 +686,27 @@ export const appRouter = router({
           }
         }
 
+        const bulkCompanyId =
+          isSuperAdminUser(user)
+            ? null
+            : input.assignTo && assigneeCompanyId != null
+              ? assigneeCompanyId
+              : user?.companyId != null
+                ? Number(user.companyId)
+                : null;
+
         const values = input.phones.map((phone, i) => ({
           phone,
           name: input.names?.[i] || null,
           origin: "Telemarketing",
           status: "novo" as const,
           addedBy: user?.id,
+          addedSource: "bulk" as const,
           listName: input.listName || null,
           assignedTo: input.assignTo || null,
           lastAssignedAt: input.assignTo ? new Date() : null,
           tenantId: contactTenantId,
+          companyId: bulkCompanyId,
         }));
 
         // Insert in batches of 500 to avoid query limits
@@ -1521,29 +1642,15 @@ Regras:
 
         await db.execute(sql`SET FOREIGN_KEY_CHECKS=0`);
         for (const t of tables) {
-          await db.execute(sql.raw(`DELETE FROM \`${t}\``));
+          if (t === "users" && input.scope === "all_except_audit" && user?.id != null) {
+            // Manter a linha do Super Admin que corre o purge — senão o re-insert não traz `password`
+            // e o login local falha sempre com «E-mail ou senha incorretos».
+            await db.delete(users).where(ne(users.id, user.id));
+          } else {
+            await db.execute(sql.raw(`DELETE FROM \`${t}\``));
+          }
         }
         await db.execute(sql`SET FOREIGN_KEY_CHECKS=1`);
-
-        // Ensure current super admin still exists (if scope was all)
-        if (input.scope === "all_except_audit") {
-          // Recreate current user minimal record so they don't lock themselves out.
-          await db.insert(users).values({
-            openId: user.openId,
-            name: user.name ?? "Super Admin",
-            email: user.email ?? null,
-            loginMethod: user.loginMethod ?? null,
-            role: "admin",
-            crmRole: "coordenador",
-            isSuperAdmin: true,
-          } as any).onDuplicateKeyUpdate({
-            set: {
-              role: "admin",
-              crmRole: "coordenador",
-              isSuperAdmin: true,
-            } as any,
-          });
-        }
 
         await db.insert(auditLogs).values({
           userId: user?.id ?? 0,
@@ -1625,6 +1732,7 @@ Regras:
           rankingPosition: null as number | null,
         };
       }
+      await purgeStaleCompletedBetaSuggestions(db);
       const user = ctx.user as any;
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -1645,6 +1753,9 @@ Regras:
         ) as SQL,
       ];
       if (contactTenant) queueParts.unshift(contactTenant);
+      if (user?.crmRole === "vendedor" && user?.id != null) {
+        queueParts.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+      }
       const dialerQueueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(contacts)
         .where(and(...queueParts));
       const dialerQueueEligibleCount = Number(dialerQueueResult[0]?.count ?? 0);
@@ -1692,11 +1803,25 @@ Regras:
       ];
       if (user?.crmRole === "vendedor") overdueConditions.push(eq(pendentes.vendedorId, user.id));
       else if (tenantPendentesV) overdueConditions.push(tenantPendentesV);
-      const overdueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
-        .where(and(...overdueConditions));
+
+      let overdueResult;
+      if (user?.crmRole === "vendedor" && user?.id != null) {
+        const oc = [...overdueConditions, sqlVendedorBypassManualExclusive(contacts, user.id)];
+        overdueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
+          .innerJoin(contacts, eq(pendentes.contactId, contacts.id))
+          .where(and(...oc));
+      } else {
+        overdueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
+          .where(and(...overdueConditions));
+      }
 
       const alertParts = [...overdueConditions];
       if (contactTenant) alertParts.push(contactTenant);
+      if (user?.crmRole === "vendedor" && user?.id != null) {
+        alertParts.push(
+          or(isNull(contacts.id), sqlVendedorBypassManualExclusive(contacts, user.id)) as SQL,
+        );
+      }
       let alertQuery = db.select({
         id: pendentes.id,
         contactId: pendentes.contactId,
@@ -1809,6 +1934,9 @@ Regras:
         ) as SQL,
       ];
       if (tcond) cand.unshift(tcond);
+      if (user?.crmRole === "vendedor" && user?.id != null) {
+        cand.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+      }
 
       const result = await db
         .select()
@@ -1835,6 +1963,9 @@ Regras:
       const tcond = whereContactsForUser(user);
       const parts: SQL[] = [eq(contacts.status, "nao_atende"), sql`${contacts.attempts} >= 3`];
       if (tcond) parts.unshift(tcond);
+      if (user?.crmRole === "vendedor" && user?.id != null) {
+        parts.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+      }
       return await db
         .select()
         .from(contacts)
@@ -1864,6 +1995,7 @@ Regras:
           lte(pendentes.returnDate, now),
         ];
         if (pT) dueWhere.push(pT);
+        if (user?.id != null) dueWhere.push(sqlVendedorBypassManualExclusive(contacts, user.id));
 
         const due = await db
           .select({ pendente: pendentes })
@@ -1900,6 +2032,9 @@ Regras:
       ];
       const dtc = whereContactsForUser(user);
       if (dtc) dq.unshift(dtc);
+      if (user?.crmRole === "vendedor" && user?.id != null) {
+        dq.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+      }
       const result = await db
         .select()
         .from(contacts)
@@ -2262,32 +2397,40 @@ Regras:
       const db = await getDb();
       if (!db) return [];
       const user = ctx.user as any;
-      return await db
+      const mineRows = await db
         .select({
           id: featureSuggestions.id,
           title: featureSuggestions.title,
           body: featureSuggestions.body,
           status: featureSuggestions.status,
+          completedAt: featureSuggestions.completedAt,
           createdAt: featureSuggestions.createdAt,
           reviewedAt: featureSuggestions.reviewedAt,
           reviewNote: featureSuggestions.reviewNote,
+          updatedAt: featureSuggestions.updatedAt,
         })
         .from(featureSuggestions)
         .where(eq(featureSuggestions.authorId, user.id))
         .orderBy(desc(featureSuggestions.createdAt))
         .limit(100);
+
+      return mineRows.map((r) => {
+        const purgeMs = betaPurgeDeadlineMs({
+          status: r.status,
+          completedAt: r.completedAt,
+          updatedAt: r.updatedAt,
+        });
+        return {
+          ...r,
+          purgeAt: purgeMs != null ? new Date(purgeMs).toISOString() : null,
+        };
+      });
     }),
 
-    listPending: protectedProcedure.query(async ({ ctx }) => {
-      if (!canReviewBetaSuggestions(ctx.user)) return [];
+    listPending: protectedProcedure.query(async () => {
       const db = await getDb();
       if (!db) return [];
-      const user = ctx.user as any;
-      const parts: SQL[] = [eq(featureSuggestions.status, "pending")];
-      if (!isSuperAdminUser(user)) {
-        if (user.tenantId == null) return [];
-        parts.push(eq(featureSuggestions.tenantId, user.tenantId));
-      }
+      /** Todas as empresas — evitar ideias duplicadas e dar contexto global. */
       const rows = await db
         .select({
           id: featureSuggestions.id,
@@ -2300,29 +2443,46 @@ Regras:
         })
         .from(featureSuggestions)
         .leftJoin(users, eq(featureSuggestions.authorId, users.id))
-        .where(and(...parts))
+        .where(eq(featureSuggestions.status, "pending"))
         .orderBy(desc(featureSuggestions.createdAt))
-        .limit(200);
-      return rows;
+        .limit(500);
+
+      const tenantIds = Array.from(
+        new Set(rows.map((r) => r.tenantId).filter((x): x is number => x != null)),
+      );
+      let tenantLabels: Record<number, string> = {};
+      if (tenantIds.length) {
+        const tr = await db
+          .select({ id: users.id, name: users.name })
+          .from(users)
+          .where(inArray(users.id, tenantIds));
+        tenantLabels = Object.fromEntries(tr.map((t) => [t.id, t.name?.trim() || `Empresa #${t.id}`]));
+      }
+
+      return rows.map((r) => ({
+        ...r,
+        tenantLabel:
+          r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
+      }));
     }),
 
-    listAccepted: protectedProcedure.query(async ({ ctx }) => {
+    listAccepted: protectedProcedure.query(async () => {
       const db = await getDb();
       if (!db) return [];
-      const user = ctx.user as any;
-      const parts: SQL[] = [eq(featureSuggestions.status, "accepted")];
-      if (!isSuperAdminUser(user)) {
-        if (user.tenantId == null) return [];
-        parts.push(eq(featureSuggestions.tenantId, user.tenantId));
-      }
+      await purgeStaleCompletedBetaSuggestions(db);
+      /* Roadmap global (todas as empresas): aligned com visibilidade Beta para evitar duplicar ideias. */
+      const parts: SQL[] = [inArray(featureSuggestions.status, ["accepted", "completed"] as any)];
       const rows = await db
         .select({
           id: featureSuggestions.id,
           tenantId: featureSuggestions.tenantId,
           title: featureSuggestions.title,
           body: featureSuggestions.body,
+          status: featureSuggestions.status,
           createdAt: featureSuggestions.createdAt,
           reviewedAt: featureSuggestions.reviewedAt,
+          completedAt: featureSuggestions.completedAt,
+          updatedAt: featureSuggestions.updatedAt,
           authorName: users.name,
         })
         .from(featureSuggestions)
@@ -2343,18 +2503,200 @@ Regras:
         tenantLabels = Object.fromEntries(tr.map((t) => [t.id, t.name?.trim() || `Empresa #${t.id}`]));
       }
 
-      return rows.map((r) => ({
-        id: r.id,
-        tenantId: r.tenantId,
-        tenantLabel:
-          r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
-        title: r.title,
-        body: r.body,
-        createdAt: r.createdAt,
-        acceptedAt: r.reviewedAt,
-        authorName: r.authorName,
-      }));
+      return rows.map((r) => {
+        const purgeMs = betaPurgeDeadlineMs({
+          status: r.status,
+          completedAt: r.completedAt,
+          updatedAt: r.updatedAt,
+        });
+        return {
+          id: r.id,
+          tenantId: r.tenantId,
+          tenantLabel:
+            r.tenantId != null ? tenantLabels[r.tenantId] ?? `Empresa #${r.tenantId}` : "Global / Super Admin",
+          title: r.title,
+          body: r.body,
+          status: r.status,
+          createdAt: r.createdAt,
+          acceptedAt: r.reviewedAt,
+          completedAt: r.completedAt,
+          /** ISO UTC — remoção automática após BETA_COMPLETED_RETENTION_DIAS a partir da conclusão. */
+          purgeAt: purgeMs != null ? new Date(purgeMs).toISOString() : null,
+          authorName: r.authorName,
+        };
+      });
     }),
+
+    listEdits: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+        const [row] = await db.select().from(featureSuggestions).where(eq(featureSuggestions.id, input.id)).limit(1);
+        if (!row) throw new Error("Sugestão não encontrada.");
+
+        // Autor sempre pode ver; coordenador/SA pode ver no âmbito.
+        const isAuthor = user?.id != null && Number(row.authorId) === Number(user.id);
+        if (!isAuthor) {
+          if (!canReviewBetaSuggestions(user)) throw new Error("Sem permissão.");
+          assertSuggestionReviewableByUser(row as any, user);
+        }
+
+        const editor = alias(users, "editor_user");
+        const edits = await db
+          .select({
+            id: featureSuggestionEdits.id,
+            editedAt: featureSuggestionEdits.createdAt,
+            editedBy: featureSuggestionEdits.editedBy,
+            editedByName: editor.name,
+            oldTitle: featureSuggestionEdits.oldTitle,
+            newTitle: featureSuggestionEdits.newTitle,
+          })
+          .from(featureSuggestionEdits)
+          .leftJoin(editor, eq(featureSuggestionEdits.editedBy, editor.id))
+          .where(eq(featureSuggestionEdits.suggestionId, input.id))
+          .orderBy(desc(featureSuggestionEdits.id))
+          .limit(50);
+        return edits;
+      }),
+
+    edit: protectedProcedure
+      .input(
+        z.object({
+          id: z.number(),
+          title: z.string().min(3).max(255),
+          body: z.string().min(10).max(8000),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [row] = await db.select().from(featureSuggestions).where(eq(featureSuggestions.id, input.id)).limit(1);
+        if (!row) throw new Error("Sugestão não encontrada.");
+
+        // Por requisito: editável também por coordenador/SA; qualquer edit fica com histórico.
+        assertSuggestionEditableByUser(row as any, user);
+        if (row.status !== "pending") {
+          throw new Error("Só pode editar sugestões pendentes.");
+        }
+
+        const newTitle = input.title.trim();
+        const newBody = input.body.trim();
+        if (newTitle === row.title && newBody === row.body) return { success: true };
+
+        await db.insert(featureSuggestionEdits).values({
+          suggestionId: row.id,
+          editedBy: user.id,
+          oldTitle: row.title,
+          oldBody: row.body,
+          newTitle,
+          newBody,
+        } as any);
+
+        await db.update(featureSuggestions).set({
+          title: newTitle,
+          body: newBody,
+        } as any).where(eq(featureSuggestions.id, row.id));
+
+        await db.insert(auditLogs).values({
+          userId: user.id,
+          action: "beta_suggestion_edit",
+          entity: "featureSuggestion",
+          entityId: row.id,
+          details: newTitle.slice(0, 255),
+        });
+
+        return { success: true };
+      }),
+
+    markCompleted: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canReviewBetaSuggestions(ctx.user)) {
+          throw new Error("Só Super Admin ou Coordenador podem concluir sugestões.");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [row] = await db.select().from(featureSuggestions).where(eq(featureSuggestions.id, input.id)).limit(1);
+        if (!row) throw new Error("Sugestão não encontrada.");
+        assertSuggestionReviewableByUser(row as any, user);
+        // Legacy: ENUM completed (migração 0022); actual: accepted + completedAt (migração 0023).
+        if (row.status === "completed") return { success: true };
+        if (row.completedAt != null) return { success: true };
+        if (row.status !== "accepted") throw new Error("Só pode concluir sugestões aceites.");
+
+        try {
+          await db
+            .update(featureSuggestions)
+            .set({ completedAt: new Date() } as any)
+            .where(eq(featureSuggestions.id, input.id));
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes("completedAt") || msg.includes("Unknown column")) {
+            throw new Error(
+              "Falta actualizar a base de dados (coluna completedAt). No servidor execute: pnpm exec drizzle-kit migrate",
+            );
+          }
+          throw e;
+        }
+
+        await db.insert(auditLogs).values({
+          userId: user.id,
+          action: "beta_suggestion_completed",
+          entity: "featureSuggestion",
+          entityId: input.id,
+          details: `${row.title}`.slice(0, 255),
+        });
+
+        await purgeStaleCompletedBetaSuggestions(db);
+
+        return { success: true };
+      }),
+
+    delete: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [row] = await db.select().from(featureSuggestions).where(eq(featureSuggestions.id, input.id)).limit(1);
+        if (!row) throw new Error("Sugestão não encontrada.");
+
+        const canReview = canReviewBetaSuggestions(user);
+        const isAuthor = user?.id != null && Number(row.authorId) === Number(user.id);
+
+        const isWorkflowDone = row.status === "completed" || row.completedAt != null;
+        if (isWorkflowDone) {
+          if (!canReview) throw new Error("Só Coordenador/Super Admin pode excluir sugestões concluídas.");
+          assertSuggestionReviewableByUser(row as any, user);
+        } else if (row.status === "pending" || row.status === "rejected") {
+          if (!isAuthor && !canReview) throw new Error("Sem permissão.");
+          if (canReview) assertSuggestionReviewableByUser(row as any, user);
+          else {
+            if (row.tenantId == null || user.tenantId == null || Number(row.tenantId) !== Number(user.tenantId)) {
+              throw new Error("Esta sugestão não pertence à sua empresa.");
+            }
+          }
+        } else {
+          throw new Error("Só pode excluir pendentes/recusadas ou concluídas.");
+        }
+
+        await db.delete(featureSuggestionEdits).where(eq(featureSuggestionEdits.suggestionId, row.id));
+        await db.delete(featureSuggestions).where(eq(featureSuggestions.id, row.id));
+
+        await db.insert(auditLogs).values({
+          userId: user.id,
+          action: "beta_suggestion_delete",
+          entity: "featureSuggestion",
+          entityId: row.id,
+          details: `${row.status}: ${row.title}`.slice(0, 255),
+        });
+
+        return { success: true };
+      }),
 
     review: protectedProcedure
       .input(
@@ -2586,14 +2928,17 @@ Regras:
         if (cten) parts.push(cten);
         if (input?.status) parts.push(eq(sales.status, input.status));
         else parts.push(sql`${sales.status} <> 'cancelado'`);
+        const saleVendedor = alias(users, "sale_vendedor");
         const rows = await db
           .select({
             sale: sales,
             contactName: contacts.name,
             contactPhone: contacts.phone,
+            vendedorName: saleVendedor.name,
           })
           .from(sales)
           .innerJoin(contacts, eq(sales.contactId, contacts.id))
+          .leftJoin(saleVendedor, eq(sales.vendedorId, saleVendedor.id))
           .where(and(...parts))
           .orderBy(desc(sales.updatedAt))
           .limit(300);
@@ -2601,6 +2946,7 @@ Regras:
           ...r.sale,
           contactName: r.contactName,
           contactPhone: r.contactPhone,
+          vendedorName: r.vendedorName ?? null,
         }));
       }),
 
@@ -2611,6 +2957,8 @@ Regras:
         offer: z.string().optional(),
         value: z.string().optional(),
         installationDate: z.string().optional(),
+        /** Campos opcionais da ficha de contrato (nenhum obrigatório). */
+        contractDossier: z.record(z.string(), z.string().max(4000)).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
@@ -2618,6 +2966,11 @@ Regras:
         const user = ctx.user as any;
 
         await assertContactAccessible(db, input.contactId, user);
+
+        const dossierJson =
+          input.contractDossier && Object.keys(input.contractDossier).length > 0
+            ? mergeSaleContractDossier(null, input.contractDossier as Record<string, string | null | undefined>)
+            : null;
 
         await db.insert(sales).values({
           contactId: input.contactId,
@@ -2627,6 +2980,7 @@ Regras:
           value: input.value || null,
           installationDate: input.installationDate ? new Date(input.installationDate) : null,
           status: "aguarda_instalacao",
+          saleContractDossier: dossierJson,
         });
 
         const [created] = await db
@@ -2682,7 +3036,7 @@ Regras:
         const s = row[0];
         if (!s) throw new Error("Venda não encontrada");
 
-        await assertContactAccessible(db, s.contactId, user);
+        await assertSalePipelineAccessForSale(db, s, user);
 
         const patch: Record<string, unknown> = {};
         if (input.status !== undefined) patch.status = input.status;
@@ -2723,6 +3077,122 @@ Regras:
           details: `Atualizou venda #${input.saleId}`,
         });
         return { success: true };
+      }),
+
+    /** Ficha de contrato / dados para exportação — todos os campos opcionais. */
+    saveContractDossier: protectedProcedure
+      .input(
+        z.object({
+          saleId: z.number(),
+          patch: z.record(z.string(), z.union([z.string().max(4000), z.literal(""), z.null()]).optional()),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+        const nextJson = mergeSaleContractDossier(
+          (s as { saleContractDossier?: string | null }).saleContractDossier ?? null,
+          input.patch as Record<string, string | null | undefined>,
+        );
+        await db
+          .update(sales)
+          .set({ saleContractDossier: nextJson } as any)
+          .where(eq(sales.id, input.saleId));
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "sale_dossier_updated",
+          entity: "sale",
+          entityId: input.saleId,
+          details: `Actualizou ficha de contrato da venda #${input.saleId}`,
+        });
+        return { success: true };
+      }),
+
+    /** Exportação CSV (Excel-friendly) do Acompanhamento + ficha de contrato. */
+    exportContractDossierCsv: protectedProcedure
+      .input(
+        z
+          .object({
+            status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado", "__all"]).optional(),
+          })
+          .optional(),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const ids = await getSellerIdsForPipelineScope(db, user);
+        const parts: SQL[] = [];
+        const vcond = whereInTenantUserIds(ids, sales.vendedorId);
+        if (vcond) parts.push(vcond);
+        const cten = whereContactsForUser(user);
+        if (cten) parts.push(cten);
+
+        const status = input?.status;
+        if (status && status !== "__all") parts.push(eq(sales.status, status as any));
+        else parts.push(sql`${sales.status} <> 'cancelado'`);
+
+        const saleVendedor = alias(users, "sale_vendedor_csv");
+        const rows = await db
+          .select({
+            sale: sales,
+            contactName: contacts.name,
+            contactPhone: contacts.phone,
+            vendedorName: saleVendedor.name,
+          })
+          .from(sales)
+          .innerJoin(contacts, eq(sales.contactId, contacts.id))
+          .leftJoin(saleVendedor, eq(sales.vendedorId, saleVendedor.id))
+          .where(and(...parts))
+          .orderBy(desc(sales.updatedAt))
+          .limit(5000);
+
+        const headers = [
+          "SALE_ID",
+          "VENDEDOR",
+          "PRODUTO",
+          "ESTADO",
+          "CONTACTO_NOME",
+          "CONTACTO_TEL",
+          ...SALE_CONTRACT_DOSSIER_FIELDS.map((f) => f.label),
+        ];
+
+        const csvEscape = (v: unknown) => {
+          const s = v == null ? "" : String(v);
+          return `"${s.replace(/\"/g, '""')}"`;
+        };
+
+        const lines: string[] = [];
+        // BOM para Excel + separador ; (pt-PT)
+        lines.push("\uFEFF" + headers.map(csvEscape).join(";"));
+
+        for (const r of rows as any[]) {
+          const sale = r.sale as any;
+          const dossier = parseSaleContractDossier(sale.saleContractDossier ?? null);
+          const base = [
+            sale.id,
+            r.vendedorName ?? `#${sale.vendedorId}`,
+            sale.product,
+            sale.status,
+            r.contactName ?? "",
+            r.contactPhone ?? "",
+          ];
+          const extra = SALE_CONTRACT_DOSSIER_FIELDS.map((f) => dossier[f.key] ?? "");
+          lines.push([...base, ...extra].map(csvEscape).join(";"));
+        }
+
+        const stamp = new Date();
+        const yyyy = stamp.getFullYear();
+        const mm = String(stamp.getMonth() + 1).padStart(2, "0");
+        const dd = String(stamp.getDate()).padStart(2, "0");
+        const filename = `acompanhamento-${yyyy}${mm}${dd}.csv`;
+
+        return { filename, csv: lines.join("\n") };
       }),
   }),
 

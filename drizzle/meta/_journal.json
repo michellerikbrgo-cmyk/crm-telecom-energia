@@ -141,6 +141,41 @@
       "when": 1778250011000,
       "tag": "0019_app_settings_payment_providers",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "5",
+      "when": 1778250012000,
+      "tag": "0020_contacts_added_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "5",
+      "when": 1778250013000,
+      "tag": "0021_sales_contract_dossier",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "5",
+      "when": 1778250014000,
+      "tag": "0022_beta_suggestions_edits_and_completed",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "5",
+      "when": 1778250015000,
+      "tag": "0023_feature_suggestions_completed_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "5",
+      "when": 1778250016000,
+      "tag": "0024_companies_hierarchy",
+      "breakpoints": true
     }
   ]
 }

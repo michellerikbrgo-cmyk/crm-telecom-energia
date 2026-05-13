@@ -32,6 +32,7 @@ import { useLocation } from "wouter";
 import atualizacoesMd from "@shared/ATUALIZACOES.md?raw";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { BetaPurgeCountdown } from "@/components/BetaPurgeCountdown";
 import { Badge } from "@/components/ui/badge";
 
 function formatReleaseAt(iso: string) {
@@ -322,6 +323,28 @@ export default function SuperAdmin() {
           <CardContent className="text-sm text-muted-foreground">
             <ul className="list-disc space-y-2.5 pl-5 leading-relaxed">
               <li>
+                <span className="font-medium text-foreground">Actualização recente — Super Admin</span> — O painel
+                passou a usar <strong className="text-foreground/90 font-medium">separadores no topo</strong>:{" "}
+                <strong className="text-foreground/90 font-medium">Visão geral</strong> (este resumo e atalhos),{" "}
+                <strong className="text-foreground/90 font-medium">Comunicação</strong> (alerta global + activação da
+                página Planos), <strong className="text-foreground/90 font-medium">Integrações</strong> (IA, WhatsApp,
+                Stripe / SumUp / PayPal), <strong className="text-foreground/90 font-medium">Registos</strong> (log de
+                deploy, beta, documentação) e <strong className="text-foreground/90 font-medium">Perigo</strong> (purge).
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Empresa e hierarquia</span> — No perfil da barra lateral
+                aparece <strong className="text-foreground/90 font-medium">Empresa:</strong> com o nome do tenant
+                (coordenador dono). A <strong className="text-foreground/90 font-medium">lista de utilizadores</strong>{" "}
+                segue hierarquia (coordenador vê o tenant; CE/CEJ só níveis abaixo na mesma equipa; vendedor não acede à
+                gestão nem ao menu Utilizadores).
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Planos para empresas (exemplo)</span> — Por defeito{" "}
+                <strong className="text-foreground/90 font-medium">desactivado</strong>. No separador Comunicação podes
+                activar o menu «Planos» e a rota <code className="text-xs">/planos</code>: modelo ilustrativo de
+                mensalidade por empresa (coord., CE e CEJ incluídos na assinatura) + lugares de vendedor.
+              </li>
+              <li>
                 <span className="font-medium text-foreground">Permissões no CRM</span> — O Super Admin utiliza o CRM
                 sem restrições de papel: contactos, campanhas, discador (conforme menu), supervisão, relatórios, equipas,
                 etc. Na <strong className="text-foreground/90 font-medium">Supervisão</strong>, vês estado de todos os
@@ -366,14 +389,18 @@ export default function SuperAdmin() {
                 <strong className="text-foreground/90 font-medium">adicionar um contacto manualmente</strong> na página
                 Contactos ou ao <strong className="text-foreground/90 font-medium">importar uma lista</strong> na Base de
                 dados, a aplicação <strong className="text-foreground/90 font-medium">abre o Discador</strong> de seguida
-                para começar a trabalhar a lead.
+                para começar a trabalhar a lead. Contactos adicionados manualmente ficam{" "}
+                <strong className="text-foreground/90 font-medium">48 horas exclusivos</strong> para outros vendedores
+                (lista, fila e detalhe); coordenadores, CE, CE Jr. e Super Admin podem supervisionar sem essa restrição.
               </li>
               <li>
                 <span className="font-medium text-foreground">Pagamentos</span> — No separador{" "}
-                <strong className="text-foreground/90 font-medium">Integrações</strong> podes configurar Stripe, SumUp e
-                PayPal (chaves encriptadas na base). Os webhooks públicos são{" "}
+                <strong className="text-foreground/90 font-medium">Integrações</strong>, em Pagamentos, configuram-se
+                Stripe (Checkout), SumUp e PayPal (credenciais encriptadas). Há botão de{" "}
+                <strong className="text-foreground/90 font-medium">teste 1 €</strong> por gateway após guardar. Webhooks:{" "}
                 <code className="text-xs">/api/webhooks/stripe</code> e{" "}
-                <code className="text-xs">/api/webhooks/paypal</code>.
+                <code className="text-xs">/api/webhooks/paypal</code>. Em produção use{" "}
+                <code className="text-xs">APP_PUBLIC_URL</code> para URLs de retorno correctos.
               </li>
             </ul>
           </CardContent>
@@ -500,8 +527,8 @@ export default function SuperAdmin() {
                 Próxima versão — sugestões aceites (Beta)
               </CardTitle>
               <p className="text-sm text-muted-foreground font-normal">
-                Lista consolidada de ideias já <strong>aceites</strong> (coordenadores por empresa). As mesmas entradas
-                aparecem filtradas por empresa na página <code className="text-xs">/beta</code>.
+                Lista consolidada de ideias já <strong>aceites</strong>. O mesmo roadmap (todas as empresas) aparece na
+                página <code className="text-xs">/beta</code>.
               </p>
             </CardHeader>
             <CardContent>
@@ -527,6 +554,11 @@ export default function SuperAdmin() {
                             ? ` · Aceite em ${new Date(s.acceptedAt).toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" })}`
                             : ""}
                         </p>
+                        {s.purgeAt ? (
+                          <p className="text-[11px] mt-2">
+                            <BetaPurgeCountdown purgeAtIso={s.purgeAt} />
+                          </p>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
