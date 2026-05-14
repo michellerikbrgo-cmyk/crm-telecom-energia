@@ -80,6 +80,10 @@ export const authLocalRouter = router({
         throw new Error("E-mail ou senha incorretos");
       }
 
+      if (truthyFlag((user as { bloqueado?: boolean }).bloqueado)) {
+        throw new Error("Acesso bloqueado. Contacte o coordenador ou RH.");
+      }
+
       const token = await sdk.createSessionToken(user.openId, {
         name: (user.name?.trim() || user.email || "Utilizador").slice(0, 200),
       });

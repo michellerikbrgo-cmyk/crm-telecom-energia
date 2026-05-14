@@ -21,13 +21,20 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Phone, Search, Filter, UserPlus, PhoneCall, Pencil, AlertCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { toast } from "sonner";
 import { TRPCClientError } from "@trpc/client";
 
-const KNOWN_ORIGINS = ["Indicação", "Telemarketing", "Website", "Redes Sociais", "Outro"] as const;
+const KNOWN_ORIGINS = [
+  "Indicação",
+  "Telemarketing",
+  "Website",
+  "Redes Sociais",
+  "Cliente Vodafone",
+  "Outro",
+] as const;
 
 const CONTACT_STATUSES = [
   ["todos", "Todos"],
@@ -37,6 +44,9 @@ const CONTACT_STATUSES = [
   ["venda", "Venda"],
   ["nao_atende", "Não Atende"],
   ["sem_interesse", "Sem Interesse"],
+  ["outros", "Outros"],
+  ["sem_cobertura_fibra", "Sem cobertura fibra"],
+  ["fidelizado", "Fidelizado"],
   ["blacklist", "Blacklist"],
 ] as const;
 
@@ -92,6 +102,7 @@ function buildContactsAddPayload(form: {
 
 export default function Contactos() {
   const [, setLocation] = useLocation();
+  const searchString = useSearch();
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
   const isSuperAdmin = !!(user as any)?.isSuperAdmin;
@@ -101,6 +112,14 @@ export default function Contactos() {
   const [searchInput, setSearchInput] = useState("");
   const debouncedSearch = useDebounced(searchInput, 400);
   const [statusFilter, setStatusFilter] = useState<string>("todos");
+
+  useEffect(() => {
+    const params = new URLSearchParams(searchString);
+    const q = params.get("q");
+    if (q != null && q.trim()) {
+      setSearchInput(q.trim());
+    }
+  }, [searchString]);
 
   const listInput = useMemo(
     () => ({
@@ -253,6 +272,9 @@ export default function Contactos() {
     venda: "bg-green-100 text-green-700",
     nao_atende: "bg-gray-100 text-gray-700",
     sem_interesse: "bg-red-100 text-red-700",
+    outros: "bg-stone-100 text-stone-800",
+    sem_cobertura_fibra: "bg-slate-200 text-slate-800",
+    fidelizado: "bg-violet-100 text-violet-800",
     blacklist: "bg-black text-white",
   };
 
@@ -467,6 +489,11 @@ export default function Contactos() {
                         {statusLabels[String((row as { status?: string }).status)] ||
                           String((row as { status?: unknown }).status ?? "")}
                       </Badge>
+                      {(row as { isVodafoneClient?: boolean }).isVodafoneClient ? (
+                        <Badge variant="outline" className="border-red-300 text-xs text-red-800">
+                          Cliente Vodafone
+                        </Badge>
+                      ) : null}
                       {canEditContact && (
                         <Button
                           type="button"

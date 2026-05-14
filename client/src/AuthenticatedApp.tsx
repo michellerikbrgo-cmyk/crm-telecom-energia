@@ -4,6 +4,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
 import { lazy, Suspense } from "react";
 import { Route, Switch } from "wouter";
+import { RoleProtectedRoute } from "@/components/RoleProtectedRoute";
 
 const Home = lazy(() => import("@/pages/Home"));
 const Contactos = lazy(() => import("@/pages/Contactos"));
@@ -27,6 +28,7 @@ const Acompanhamento = lazy(() => import("@/pages/Acompanhamento"));
 const Beta = lazy(() => import("@/pages/Beta"));
 const BetaRevisao = lazy(() => import("@/pages/BetaRevisao"));
 const PlanosEmpresas = lazy(() => import("@/pages/PlanosEmpresas"));
+const Notificacoes = lazy(() => import("@/pages/Notificacoes"));
 
 /** Carregado só nas rotas autenticadas — não entra no chunk do /login */
 export default function AuthenticatedApp() {
@@ -35,11 +37,16 @@ export default function AuthenticatedApp() {
       <DashboardLayout>
         <Suspense fallback={<PageLoadFallback />}>
           <Switch>
+            <Route path="/notificacoes" component={Notificacoes} />
             <Route path="/painel" component={Home} />
             <Route path="/beta/revisao" component={BetaRevisao} />
             <Route path="/beta" component={Beta} />
             <Route path="/acompanhamento" component={Acompanhamento} />
-            <Route path="/contactos" component={Contactos} />
+            <Route path="/contactos">
+              <RoleProtectedRoute allow={["cej", "ce", "coordenador"]}>
+                <Contactos />
+              </RoleProtectedRoute>
+            </Route>
             <Route path="/pendentes" component={Pendentes} />
             <Route path="/contratos" component={Contratos} />
             <Route path="/calculadora" component={Calculadora} />
@@ -49,14 +56,22 @@ export default function AuthenticatedApp() {
             <Route path="/ranking" component={Ranking} />
             <Route path="/calendario" component={Calendario} />
             <Route path="/relatorios" component={Relatorios} />
-            <Route path="/equipa" component={Equipa} />
+            <Route path="/equipa">
+              <RoleProtectedRoute allow={["cej", "ce", "coordenador"]}>
+                <Equipa />
+              </RoleProtectedRoute>
+            </Route>
             <Route path="/auditoria" component={Auditoria} />
             <Route path="/base-dados" component={BaseDados} />
             <Route path="/utilizadores" component={GestaoUtilizadores} />
             <Route path="/super-admin" component={SuperAdmin} />
             <Route path="/discador" component={Discador} />
             <Route path="/supervisao" component={Supervisao} />
-            <Route path="/lista-negra" component={ListaNegra} />
+            <Route path="/lista-negra">
+              <RoleProtectedRoute allow={["ce", "coordenador"]}>
+                <ListaNegra />
+              </RoleProtectedRoute>
+            </Route>
             <Route path="/404" component={NotFound} />
             <Route component={NotFound} />
           </Switch>

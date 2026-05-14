@@ -32,6 +32,9 @@ import {
 import { ClipboardList, FileSpreadsheet } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { useSearch } from "wouter";
+import { cn } from "@/lib/utils";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 const STATUS_OPTIONS = [
   { value: "__all", label: "Todas (excepto canceladas)" },
@@ -39,6 +42,8 @@ const STATUS_OPTIONS = [
   { value: "em_aberto", label: "Em aberto / problema técnico" },
   { value: "activo", label: "Activo" },
   { value: "e_switch", label: "e-switch (energia)" },
+  { value: "pendente", label: "Pendente" },
+  { value: "nao_fechou", label: "Não fechou" },
   { value: "cancelado", label: "Cancelado" },
 ] as const;
 
@@ -49,6 +54,8 @@ type PipelineRow = {
   product: string;
   status: string;
   installationDate: Date | string | null;
+  dataAtivacao?: Date | string | null;
+  publicSaleId?: string | null;
   saleContractDossier?: string | null;
   contactName?: string | null;
   contactPhone?: string | null;
@@ -78,14 +85,54 @@ const SECTION_ORDER: SaleContractDossierSection[] = [
 ];
 
 export default function Acompanhamento() {
+  const { user } = useAuth();
+  const crmRole = (user as { crmRole?: string } | null)?.crmRole ?? "vendedor";
+  const canActivateService = ["vendedor", "cej", "ce", "coordenador"].includes(crmRole);
+
+  const search = useSearch();
+  const highlightContactId = useMemo(() => {
+    const idStr = new URLSearchParams(search).get("contactId");
+    if (!idStr) return undefined;
+    const id = parseInt(idStr, 10);
+    return Number.isFinite(id) && id > 0 ? id : undefined;
+  }, [search]);
+
   const [filter, setFilter] = useState<string>("__all");
+  const [createdFrom, setCreatedFrom] = useState("");
+  const [createdTo, setCreatedTo] = useState("");
+  const [activatedFrom, setActivatedFrom] = useState("");
+  const [activatedTo, setActivatedTo] = useState("");
   const [sheetSale, setSheetSale] = useState<PipelineRow | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
 
   const queryInput = useMemo(() => {
-    if (filter === "__all") return undefined;
-    return { status: filter as "aguarda_instalacao" | "em_aberto" | "activo" | "e_switch" | "cancelado" };
-  }, [filter]);
+    const out: {
+      status?:
+        | "aguarda_instalacao"
+        | "em_aberto"
+        | "activo"
+        | "e_switch"
+        | "cancelado"
+        | "pendente"
+        | "nao_fechou";
+      contactId?: number;
+      createdFrom?: string;
+      createdTo?: string;
+      activatedFrom?: string;
+      activatedTo?: string;
+    } = {};
+    if (filter !== "__all") {
+      out.status = filter as (typeof out)["status"];
+    }
+    if (highlightContactId != null) {
+      out.contactId = highlightContactId;
+    }
+    if (createdFrom.trim()) out.createdFrom = createdFrom.trim();
+    if (createdTo.trim()) out.createdTo = createdTo.trim();
+    if (activatedFrom.trim()) out.activatedFrom = activatedFrom.trim();
+    if (activatedTo.trim()) out.activatedTo = activatedTo.trim();
+    return Object.keys(out).length > 0 ? out : undefined;
+  }, [filter, highlightContactId, createdFrom, createdTo, activatedFrom, activatedTo]);
 
   const utils = trpc.useUtils();
   const pipelineQuery = trpc.sales.pipeline.useQuery(queryInput);
@@ -100,6 +147,14 @@ export default function Acompanhamento() {
       await utils.sales.pipeline.invalidate();
     },
     onError: (e: { message?: string }) => toast.error(e.message || "Erro ao guardar"),
+  });
+
+  const activateMutation = trpc.sales.activateService.useMutation({
+    onSuccess: async () => {
+      toast.success("Serviço activado");
+      await utils.sales.pipeline.invalidate();
+    },
+    onError: (e: { message?: string }) => toast.error(e.message || "Erro"),
   });
 
   const rows = (pipelineQuery.data ?? []) as PipelineRow[];
@@ -190,6 +245,29 @@ export default function Acompanhamento() {
               ))}
             </SelectContent>
           </Select>
+        <div className="grid gap-3 sm:grid-cols-2 mt-4 pt-4 border-t">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Criação desde</Label>
+            <Input type="date" value={createdFrom} onChange={(e) => setCreatedFrom(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Criação até</Label>
+            <Input type="date" value={createdTo} onChange={(e) => setCreatedTo(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Activação desde</Label>
+            <Input type="date" value={activatedFrom} onChange={(e) => setActivatedFrom(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Activação até</Label>
+            <Input type="date" value={activatedTo} onChange={(e) => setActivatedTo(e.target.value)} />
+          </div>
+        </div>
+        {highlightContactId != null ? (
+          <p className="text-xs text-muted-foreground mt-3 pt-2 border-t">
+            A filtrar vendas do contacto <span className="font-mono text-foreground">#{highlightContactId}</span>.
+          </p>
+        ) : null}
         </CardContent>
       </Card>
 
@@ -206,12 +284,14 @@ export default function Acompanhamento() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-muted-foreground">
+                    <th className="p-3 font-medium">SALE_ID</th>
                     <th className="p-3 font-medium">#</th>
                     <th className="p-3 font-medium">Vendedor</th>
                     <th className="p-3 font-medium">Contacto</th>
                     <th className="p-3 font-medium">Produto</th>
                     <th className="p-3 font-medium">Estado</th>
                     <th className="p-3 font-medium">Instalação</th>
+                    <th className="p-3 font-medium">Activação</th>
                     <th className="p-3 font-medium">Ficha</th>
                     <th className="p-3 font-medium w-[140px]">Acções</th>
                   </tr>
@@ -223,7 +303,16 @@ export default function Acompanhamento() {
                     const total = SALE_CONTRACT_DOSSIER_FIELDS.length;
                     const pct = total === 0 ? 0 : Math.round((filled / total) * 100);
                     return (
-                      <tr key={r.id} className="border-b last:border-0 hover:bg-muted/30">
+                      <tr
+                        key={r.id}
+                        className={cn(
+                          "border-b last:border-0 hover:bg-muted/30",
+                          highlightContactId != null &&
+                            r.contactId === highlightContactId &&
+                            "bg-primary/10 ring-1 ring-inset ring-primary/20",
+                        )}
+                      >
+                        <td className="p-3 font-mono text-xs">{r.publicSaleId || "—"}</td>
                         <td className="p-3 font-mono">{r.id}</td>
                         <td className="p-3">
                           <div className="font-medium text-foreground">{r.vendedorName || "—"}</div>
@@ -243,6 +332,14 @@ export default function Acompanhamento() {
                               })
                             : "—"}
                         </td>
+                        <td className="p-3 whitespace-nowrap text-muted-foreground">
+                          {r.dataAtivacao
+                            ? new Date(r.dataAtivacao as unknown as string).toLocaleString("pt-PT", {
+                                dateStyle: "short",
+                                timeStyle: "short",
+                              })
+                            : "—"}
+                        </td>
                         <td className="p-3">
                           <div className="flex flex-col gap-1 min-w-[100px]">
                             <Badge variant={filled === 0 ? "secondary" : "default"} className="w-fit text-xs">
@@ -251,12 +348,24 @@ export default function Acompanhamento() {
                             <Progress value={pct} className="h-1.5" />
                           </div>
                         </td>
-                        <td className="p-3">
+                        <td className="p-3 space-y-2">
+                          {canActivateService && r.status !== "activo" && r.status !== "cancelado" ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="default"
+                              className="w-full"
+                              disabled={activateMutation.isPending}
+                              onClick={() => activateMutation.mutate({ saleId: r.id })}
+                            >
+                              Activar serviço
+                            </Button>
+                          ) : null}
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
-                            className="gap-1.5"
+                            className="gap-1.5 w-full"
                             onClick={() => setSheetSale(r)}
                           >
                             <FileSpreadsheet className="h-3.5 w-3.5" />

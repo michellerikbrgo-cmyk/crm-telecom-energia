@@ -28,9 +28,32 @@ import {
   teams,
   featureSuggestions,
   featureSuggestionEdits,
+  contactSubcontacts,
+  crmNotifications,
+  fidelizacoesTerminando,
 } from "../drizzle/schema";
 import { alias } from "drizzle-orm/mysql-core";
-import { eq, desc, asc, and, sql, like, or, inArray, lte, gte, lt, isNull, isNotNull, ne, type SQL } from "drizzle-orm";
+import {
+  eq,
+  desc,
+  asc,
+  and,
+  sql,
+  like,
+  or,
+  inArray,
+  lte,
+  gte,
+  lt,
+  isNull,
+  isNotNull,
+  ne,
+  exists,
+  not,
+  count,
+  type SQL,
+} from "drizzle-orm";
+import { getGlobalApiUsageSnapshot } from "./_core/globalApiUsage";
 import { invokeLLM } from "./_core/llm";
 import { detectImageMimeFromBuffer } from "./_core/imageMagic";
 import {
@@ -58,9 +81,12 @@ import {
   lookupGeoLabel,
   summarizeUserAgent,
 } from "./_core/clientMeta";
+import { applyAutomaticVodafoneClientIfNeeded, batchApplyVodafoneAutomationAfterBulk } from "./vodafoneClient";
+import { dialerBlacklistExcludeSql, dialerStatusEligibleSql, executeSubmitAfterAnsweredCall } from "./feedbackAfterCall";
 import { readReleaseLogMerged } from "./releaseLogStore";
 import { createPaymentCheckoutUrl } from "./payments/createCheckout";
 import { getAppPublicUrl } from "./payments/appBaseUrl";
+import { dedupeSnippetsByUrl, searchWebTavily } from "./_core/webSearch";
 
 function canManageCampaigns(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
@@ -74,7 +100,12 @@ function canManageCampaigns(user: unknown): boolean {
 
 function canUseDialer(user: unknown): boolean {
   const u = user as { crmRole?: string } | null;
-  return ["vendedor", "cej", "ce"].includes(u?.crmRole || "");
+  return ["vendedor", "cej", "ce", "coordenador"].includes(u?.crmRole || "");
+}
+
+/** Feedback pós-chamada atendida: quem pode usar o discador (vendedor, CEJ, CE, coordenador). */
+function canSubmitCallFeedback(user: unknown): boolean {
+  return canUseDialer(user);
 }
 
 function canEditContactsAsManager(user: unknown): boolean {
@@ -167,14 +198,15 @@ async function getSellerIdsForPipelineScope(
 async function blacklistTeamScopeForInsert(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   user: any,
-): Promise<{ tenantId: number | null; teamId: number | null }> {
-  if (isSuperAdminUser(user)) return { tenantId: null, teamId: null };
+): Promise<{ tenantId: number | null; teamId: number | null; companyId: number | null }> {
+  if (isSuperAdminUser(user)) return { tenantId: null, teamId: null, companyId: null };
   const tid = user?.tenantId as number | null | undefined;
   if (tid == null || tid === undefined) {
     throw new Error("Conta sem empresa (coordenador); não é possível usar a lista negra.");
   }
+  const companyId = user?.companyId != null ? Number(user.companyId) : null;
   if (user.crmRole === "coordenador") {
-    return { tenantId: tid, teamId: null };
+    return { tenantId: tid, teamId: null, companyId };
   }
   const teamId = await resolveUserTeamScopeId(db, {
     id: user.id,
@@ -184,7 +216,7 @@ async function blacklistTeamScopeForInsert(
   if (teamId == null) {
     throw new Error("Associe o utilizador a uma equipa (teamId) para usar a lista negra.");
   }
-  return { tenantId: tid, teamId };
+  return { tenantId: tid, teamId, companyId };
 }
 
 const INSTALL_CAL_TITLE_PREFIX = "Instalação #";
@@ -297,6 +329,69 @@ function sqlVendedorBypassManualExclusive(c: typeof contacts, vendedorId: number
   )` as SQL;
 }
 
+/** Fila aleatória do discador: `novo`, não Vodafone, sem chamada **atendida** pelo utilizador nos últimos 30 dias. */
+function buildDialerNovoQueueSqls(
+  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
+  user: any,
+  opts: { skipAnsweredCooldown: boolean },
+): SQL[] {
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const parts: SQL[] = [dialerStatusEligibleSql(db), eq(contacts.isVodafoneClient, false)];
+
+  const dtc = whereContactsForUser(user);
+  if (dtc) parts.unshift(dtc);
+
+  if (user?.crmRole === "vendedor" && user?.id != null) {
+    parts.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+  }
+
+  if (
+    !opts.skipAnsweredCooldown &&
+    user?.id != null &&
+    ["vendedor", "cej", "ce", "coordenador"].includes(String(user?.crmRole || ""))
+  ) {
+    parts.push(
+      not(
+        exists(
+          db
+            .select({ id: callLogs.id })
+            .from(callLogs)
+            .where(
+              and(
+                eq(callLogs.contactId, contacts.id),
+                eq(callLogs.vendedorId, user.id),
+                eq(callLogs.outcome, "atendeu"),
+                gte(callLogs.calledAt, thirtyDaysAgo),
+              ),
+            ),
+        ),
+      ) as SQL,
+    );
+  }
+
+  parts.push(
+    not(
+      exists(
+        db
+          .select({ id: fidelizacoesTerminando.id })
+          .from(fidelizacoesTerminando)
+          .where(
+            and(
+              eq(fidelizacoesTerminando.contactId, contacts.id),
+              gte(fidelizacoesTerminando.dataFimFidelizacao, sql`CURDATE()`),
+            ),
+          ),
+      ),
+    ) as SQL,
+  );
+
+  parts.push(dialerBlacklistExcludeSql(db));
+
+  return parts;
+}
+
 async function assertContactAccessible(
   db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
   contactId: number,
@@ -371,10 +466,58 @@ function extractAssistantText(raw: unknown): string {
     .join("");
 }
 
+type SalesChatResult =
+  | { ok: true; text: string }
+  | { ok: false; message: string };
+
+/** Mensagem em português para o utilizador, sem expor detalhes sensíveis da API. */
+function userFacingLlmFailureMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const m = raw.toLowerCase();
+  if (
+    m.includes("429") ||
+    m.includes("resource exhausted") ||
+    m.includes("resourceexhausted") ||
+    m.includes("rate limit") ||
+    m.includes("ratelimit") ||
+    m.includes("quota") ||
+    m.includes("too many requests")
+  ) {
+    return "Limite ou quota do fornecedor de IA foi atingido. Aguarde ou configure outro fornecedor (OpenAI, Gemini, DeepSeek, Claude) na Super Admin.";
+  }
+  if (
+    m.includes("401") ||
+    m.includes("403") ||
+    m.includes("invalid api key") ||
+    m.includes("incorrect api key") ||
+    m.includes("permission denied") ||
+    m.includes("api key not valid")
+  ) {
+    return "Chave de API rejeitada ou sem permissão. Verifique as chaves na Super Admin ou OPENAI_API_KEY / GEMINI_API_KEY / DEEPSEEK_API_KEY / ANTHROPIC_API_KEY no servidor.";
+  }
+  if (
+    m.includes("fetch failed") ||
+    m.includes("econnrefused") ||
+    m.includes("enotfound") ||
+    m.includes("network") ||
+    m.includes("socket hang up")
+  ) {
+    return "Erro de rede ao contactar o fornecedor de IA. Tente mais tarde.";
+  }
+  if (
+    m.includes("indisponível") ||
+    m.includes("configure pelo menos um fornecedor") ||
+    m.includes("sem chave")
+  ) {
+    return "Nenhum fornecedor de IA está configurado com chave válida. Na Super Admin defina pelo menos OpenAI (sk-…), Gemini (AIza…), DeepSeek ou Claude; ou use variáveis de ambiente no servidor.";
+  }
+  return "IA indisponível. Verifique a Super Admin (fornecedor preferido e chaves) e os logs do servidor (PM2) para o detalhe técnico.";
+}
+
 async function completeSalesChat(
   systemPrompt: string,
   conversation: Array<{ role: "user" | "assistant"; content: string }>,
-): Promise<string> {
+): Promise<SalesChatResult> {
   const messages = [
     { role: "system" as const, content: systemPrompt },
     ...conversation.map((m) => ({ role: m.role, content: m.content })),
@@ -383,13 +526,19 @@ async function completeSalesChat(
   try {
     const response = await invokeLLM({ messages });
     const raw = response.choices?.[0]?.message?.content;
-    const text = extractAssistantText(raw);
-    if (text.trim()) return text.trim();
-  } catch {
-    /* invokeLLM usa OpenAI */
+    const text = extractAssistantText(raw).trim();
+    if (text) return { ok: true, text };
+    console.warn("[completeSalesChat] resposta vazia do modelo");
+    return {
+      ok: false,
+      message:
+        "A IA não devolveu texto útil. Tente de novo; se persistir, verifique o fornecedor e as chaves na Super Admin.",
+    };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    console.warn("[completeSalesChat] invokeLLM falhou:", detail);
+    return { ok: false, message: userFacingLlmFailureMessage(e) };
   }
-
-  return "";
 }
 
 function roleplayTopicHint(topic: "telecom" | "energia" | "ambos"): string {
@@ -408,6 +557,84 @@ const ROLEPLAY_SYSTEM_PREFIX =
   "Fala português de Portugal, tom natural de telefonema. Nunca revele que é uma IA. " +
   "Não escreva meta-comentários (ex.: «Como cliente digo…»). Responda só com a fala do cliente: uma ou duas frases curtas. " +
   "Pode objectar ao preço, fidelização, comparar com MEO/NOS, ou hesitar. Se o vendedor for convincente, pode ceder um pouco.";
+
+const feedbackAfterAnsweredInputSchema = z
+  .object({
+    contactId: z.number(),
+    destination: z.enum([
+      "none",
+      "no_interest",
+      "vodafone_client",
+      "other",
+      "no_fiber_coverage",
+      "fidelizado",
+      "lead",
+      "pendente",
+    ]),
+    observacoes: z.string().optional(),
+    pendenteReturnDate: z.string().optional(),
+    fidelEndDate: z.string().min(1, "Data de fidelização obrigatória."),
+    operadora: z.enum(["NOS", "MEO", "NOWO", "DIGI", "WOO", "AMIGO", "UZO"]).optional(),
+    pendentePriorityLevel: z.coerce.number().int().min(1).max(5).optional(),
+    pendenteSaleDetail: z.record(z.string(), z.string()).optional(),
+    titularTroca: z.boolean().optional(),
+    antigoTitularNome: z.string().optional(),
+    antigoTitularNif: z.string().optional(),
+    preAgendamentoAt: z.string().optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.destination === "pendente" && !String(d.pendenteReturnDate ?? "").trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Defina a data de retorno para o pendente.",
+        path: ["pendenteReturnDate"],
+      });
+    }
+    if (d.titularTroca) {
+      if (!String(d.antigoTitularNome ?? "").trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Nome do antigo titular obrigatório.",
+          path: ["antigoTitularNome"],
+        });
+      }
+      if (!String(d.antigoTitularNif ?? "").trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "NIF do antigo titular obrigatório.",
+          path: ["antigoTitularNif"],
+        });
+      }
+    }
+  });
+
+async function runFeedbackAfterAnsweredMutation(
+  ctx: { user?: unknown },
+  input: z.infer<typeof feedbackAfterAnsweredInputSchema>,
+) {
+  const db = await getDb();
+  if (!db) throw new Error("Database not available");
+  const user = ctx.user as any;
+  if (!canSubmitCallFeedback(user)) {
+    throw new Error("Só quem pode usar o discador pode submeter este feedback de chamada atendida.");
+  }
+  await assertContactAccessible(db, input.contactId, user);
+  await executeSubmitAfterAnsweredCall(db, user, {
+    contactId: input.contactId,
+    destination: input.destination,
+    observacoes: input.observacoes,
+    pendenteReturnDate: input.pendenteReturnDate,
+    fidelEndDate: input.fidelEndDate,
+    operadora: input.operadora ?? null,
+    pendentePriorityLevel: input.pendentePriorityLevel,
+    pendenteSaleDetail: input.pendenteSaleDetail,
+    titularTroca: input.titularTroca,
+    antigoTitularNome: input.antigoTitularNome,
+    antigoTitularNif: input.antigoTitularNif,
+    preAgendamentoAt: input.preAgendamentoAt,
+  });
+  return { success: true as const };
+}
 
 export const appRouter = router({
   system: systemRouter,
@@ -638,6 +865,16 @@ export const appRouter = router({
           companyId: contactCompanyId,
         } as any);
 
+        const [created] = await db
+          .select({ id: contacts.id })
+          .from(contacts)
+          .where(and(eq(contacts.phone, input.phone), eq(contacts.addedBy, user.id)))
+          .orderBy(desc(contacts.id))
+          .limit(1);
+        if (created?.id != null) {
+          await applyAutomaticVodafoneClientIfNeeded(db, created.id);
+        }
+
         // Log audit
         await db.insert(auditLogs).values({
           userId: user?.id,
@@ -695,6 +932,8 @@ export const appRouter = router({
                 ? Number(user.companyId)
                 : null;
 
+        const bulkStartedAt = new Date();
+
         const values = input.phones.map((phone, i) => ({
           phone,
           name: input.names?.[i] || null,
@@ -714,6 +953,12 @@ export const appRouter = router({
           const batch = values.slice(i, i + 500);
           await db.insert(contacts).values(batch);
         }
+
+        await batchApplyVodafoneAutomationAfterBulk(db, {
+          tenantId: contactTenantId,
+          createdAfter: bulkStartedAt,
+          addedByUserId: user.id,
+        });
 
         await db.insert(auditLogs).values({
           userId: user?.id,
@@ -735,7 +980,20 @@ export const appRouter = router({
         origin: z.string().optional(),
         address: z.string().optional().nullable(),
         postalCode: z.string().optional().nullable(),
-        status: z.enum(["novo", "em_contacto", "pendente", "venda", "nao_atende", "sem_interesse", "blacklist"]).optional(),
+        status: z
+          .enum([
+            "novo",
+            "em_contacto",
+            "pendente",
+            "venda",
+            "nao_atende",
+            "sem_interesse",
+            "blacklist",
+            "outros",
+            "sem_cobertura_fibra",
+            "fidelizado",
+          ])
+          .optional(),
       }))
       .mutation(async ({ ctx, input }) => {
         if (!canEditContactsAsManager(ctx.user)) {
@@ -761,6 +1019,7 @@ export const appRouter = router({
         if (patch.status !== undefined) payload.status = patch.status;
         if (Object.keys(payload).length === 0) return { success: true };
         await db.update(contacts).set(payload as any).where(eq(contacts.id, id));
+        await applyAutomaticVodafoneClientIfNeeded(db, id);
         await db.insert(auditLogs).values({
           userId: user?.id,
           action: "update",
@@ -769,6 +1028,21 @@ export const appRouter = router({
           details: "Atualizou contacto",
         });
         return { success: true };
+      }),
+
+    /** Linhas em `contact_subcontacts` (ex.: número classificado como cliente Vodafone). */
+    subcontactsByContact: protectedProcedure
+      .input(z.object({ contactId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+        await assertContactAccessible(db, input.contactId, user);
+        return db
+          .select()
+          .from(contactSubcontacts)
+          .where(eq(contactSubcontacts.contactId, input.contactId))
+          .orderBy(desc(contactSubcontacts.createdAt));
       }),
   }),
 
@@ -971,10 +1245,13 @@ export const appRouter = router({
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
-        if (!["coordenador", "ce", "cej"].includes(user?.crmRole ?? "") && !isSuperAdminUser(user)) {
-          throw new Error("Apenas Coordenador, Chefe de Equipa ou CEJ podem criar eventos de calendário.");
+        if (!["coordenador", "ce", "cej", "vendedor"].includes(user?.crmRole ?? "") && !isSuperAdminUser(user)) {
+          throw new Error("Sem permissão para criar eventos de calendário.");
         }
 
+        if (input.contactId != null) {
+          await assertContactAccessible(db, input.contactId, user);
+        }
         const startAt = new Date(input.startAt);
         const endAt = input.endAt ? new Date(input.endAt) : null;
 
@@ -1230,7 +1507,9 @@ export const appRouter = router({
         }
 
         const keyPrefix = `campaigns/${input.campaignId}`;
-        const relKey = `${keyPrefix}/${input.filename}`;
+        const safeName =
+          input.filename.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_").slice(0, 180) || "document.pdf";
+        const relKey = `${keyPrefix}/${safeName}`;
         const { key, url } = await storagePut(relKey, buffer, "application/pdf");
 
         await db.insert(campaignFiles).values({
@@ -1284,17 +1563,13 @@ Regras:
 - Mencione benefícios como: poupança, qualidade de serviço, fidelização sem compromisso, apoio técnico dedicado
 - Produtos: Vodafone (fibra, móvel, TV) e Repsol (eletricidade, gás, combustível com desconto)`;
 
-        const text = await completeSalesChat(systemPrompt, [
+        const r = await completeSalesChat(systemPrompt, [
           {
             role: "user",
             content: `O cliente disse: "${input.objection}"\n\nComo devo responder para ultrapassar esta objeção?`,
           },
         ]);
-        if (text) return { response: text };
-        return {
-          response:
-            "IA indisponível. Configure OpenAI na página Super Admin ou OPENAI_API_KEY no servidor.",
-        };
+        return { response: r.ok ? r.text : r.message };
       }),
 
     /** Simulador: IA interpreta o cliente; o utilizador é o vendedor. */
@@ -1318,9 +1593,6 @@ Regras:
         const topic = input.topic ?? "ambos";
         const systemPrompt = ROLEPLAY_SYSTEM_PREFIX + roleplayTopicHint(topic);
 
-        const fallbackMsg =
-          "IA indisponível. Configure OpenAI na página Super Admin ou OPENAI_API_KEY no servidor.";
-
         if (input.stage === "start") {
           const conversation: Array<{ role: "user" | "assistant"; content: string }> = [
             {
@@ -1329,8 +1601,8 @@ Regras:
                 "Inicia a simulação. Responde APENAS com a primeira fala do cliente ao telefone (objeção, dúvida ou recusa suave). Sem prefixos tipo «Cliente:» nem aspas.",
             },
           ];
-          const text = await completeSalesChat(systemPrompt, conversation);
-          return { customerMessage: text.trim() || fallbackMsg };
+          const r = await completeSalesChat(systemPrompt, conversation);
+          return { customerMessage: r.ok ? r.text : r.message };
         }
 
         const t = input.transcript ?? [];
@@ -1350,8 +1622,68 @@ Regras:
           }
         }
 
-        const text = await completeSalesChat(systemPrompt, conversation);
-        return { customerMessage: text.trim() || fallbackMsg };
+        const r = await completeSalesChat(systemPrompt, conversation);
+        return { customerMessage: r.ok ? r.text : r.message };
+      }),
+
+    /**
+     * Pesquisa web (Tavily) + síntese LLM: ofertas Vodafone e/ou concorrentes em Portugal.
+     * Requer `TAVILY_API_KEY` no ambiente do servidor.
+     */
+    marketResearch: protectedProcedure
+      .input(
+        z.object({
+          scope: z.enum(["vodafone", "competitors", "geral"]).default("geral"),
+          extra: z.string().max(300).optional(),
+        }),
+      )
+      .mutation(async ({ input }) => {
+        const extra = String(input.extra ?? "").trim();
+        const suffix = extra ? ` ${extra}` : "";
+
+        const queries: string[] = [];
+        if (input.scope === "vodafone" || input.scope === "geral") {
+          queries.push(`site:vodafone.pt pacotes fibra móvel TV preços Portugal${suffix}`);
+        }
+        if (input.scope === "competitors" || input.scope === "geral") {
+          queries.push(
+            `MEO NOS NOWO Digi pacotes fibra TV preços Portugal residencial empresa 2026${suffix}`,
+          );
+        }
+
+        const merged: Awaited<ReturnType<typeof searchWebTavily>> = [];
+        for (const q of queries) {
+          merged.push(...(await searchWebTavily(q)));
+        }
+        const snippets = dedupeSnippetsByUrl(merged).slice(0, 12);
+
+        if (!snippets.length) {
+          const noKey = !process.env.TAVILY_API_KEY?.trim();
+          return {
+            response: noKey
+              ? "Para pesquisar na internet (ofertas Vodafone e concorrentes), configure **TAVILY_API_KEY** no servidor (https://tavily.com). Sem esta chave, use apenas o assistente de objeções com conhecimento geral."
+              : "Não foram obtidos resultados de pesquisa. Tente outras palavras-chave ou mais tarde.",
+            sources: [] as { title: string; url: string }[],
+          };
+        }
+
+        const excerptBlock = snippets
+          .map((s, i) => `### Fonte ${i + 1}: ${s.title}\nURL: ${s.url}\n${s.content}`)
+          .join("\n\n");
+
+        const systemPrompt = `É um analista comercial em Portugal (telecomunicações). Use APENAS os excertos abaixo (podem estar desactualizados). Não invente preços que não constem dos excertos; quando citar valores, indique a fonte (Fonte 1, 2…).
+Responda em **português de Portugal** para um vendedor: síntese útil, comparação quando os dados permitirem, e avise sempre de confirmar no site oficial ou no sistema interno antes de fechar.`;
+
+        const userContent = `Excertos de pesquisa web:\n\n${excerptBlock}\n\n---\nTarefa: orientações práticas e argumentos de venda; destaque Vodafone vs concorrentes quando fizer sentido com estes dados.`;
+
+        const r = await completeSalesChat(systemPrompt, [{ role: "user", content: userContent }]);
+
+        return {
+          response: r.ok
+            ? r.text
+            : `${r.message} (Há excertos de pesquisa web; falhou só a síntese por LLM.)`,
+          sources: snippets.map((s) => ({ title: s.title, url: s.url })),
+        };
       }),
   }),
 
@@ -1362,6 +1694,9 @@ Regras:
       const entries = await readReleaseLogMerged();
       return { entries };
     }),
+
+    /** Contagem global de pedidos Gemini e pesquisas Tavily no período actual (env: GEMINI_QUOTA_PERIOD, etc.). */
+    getGlobalApiUsage: superAdminProcedure.query(async () => getGlobalApiUsageSnapshot()),
 
     getSettings: superAdminProcedure.query(async () => {
       const db = await getDb();
@@ -1743,19 +2078,9 @@ Regras:
       const tenantSalesV = whereInTenantUserIds(sellerIds, sales.vendedorId);
       const contactTenant = whereContactsForUser(user);
 
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      const queueParts: SQL[] = [
-        eq(contacts.status, "novo"),
-        or(
-          sql`${contacts.lastAssignedAt} IS NULL`,
-          sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`,
-        ) as SQL,
-      ];
-      if (contactTenant) queueParts.unshift(contactTenant);
-      if (user?.crmRole === "vendedor" && user?.id != null) {
-        queueParts.push(sqlVendedorBypassManualExclusive(contacts, user.id));
-      }
+      const queueParts = buildDialerNovoQueueSqls(db, user, {
+        skipAnsweredCooldown: !["vendedor", "cej", "ce", "coordenador"].includes(String(user?.crmRole || "")),
+      });
       const dialerQueueResult = await db.select({ count: sql<number>`COUNT(*)` }).from(contacts)
         .where(and(...queueParts));
       const dialerQueueEligibleCount = Number(dialerQueueResult[0]?.count ?? 0);
@@ -1843,9 +2168,9 @@ Regras:
       const yr = today.getFullYear();
       let activeInstallConditions: SQL[] = [
         eq(sales.status, "activo"),
-        sql`${sales.installationDate} IS NOT NULL`,
-        sql`MONTH(${sales.installationDate}) = ${mo}`,
-        sql`YEAR(${sales.installationDate}) = ${yr}`,
+        sql`(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) IS NOT NULL`,
+        sql`MONTH(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${mo}`,
+        sql`YEAR(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${yr}`,
       ];
       if (user?.crmRole === "vendedor") activeInstallConditions.push(eq(sales.vendedorId, user.id));
       else if (tenantSalesV) activeInstallConditions.push(tenantSalesV);
@@ -1881,9 +2206,9 @@ Regras:
       let rankingPosition: number | null = null;
       const rankBase: SQL[] = [
         eq(sales.status, "activo"),
-        sql`${sales.installationDate} IS NOT NULL`,
-        sql`MONTH(${sales.installationDate}) = ${mo}`,
-        sql`YEAR(${sales.installationDate}) = ${yr}`,
+        sql`(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) IS NOT NULL`,
+        sql`MONTH(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${mo}`,
+        sql`YEAR(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${yr}`,
       ];
       if (tenantSalesV) rankBase.push(tenantSalesV);
       const rankCounts = await db.select({
@@ -1921,27 +2246,13 @@ Regras:
       if (!db) return null;
       const user = ctx.user as any;
 
-      // Get next available contact not assigned in last 30 days
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-
-      const tcond = whereContactsForUser(user);
-      const cand: SQL[] = [
-        eq(contacts.status, "novo"),
-        or(
-          sql`${contacts.lastAssignedAt} IS NULL`,
-          sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`,
-        ) as SQL,
-      ];
-      if (tcond) cand.unshift(tcond);
-      if (user?.crmRole === "vendedor" && user?.id != null) {
-        cand.push(sqlVendedorBypassManualExclusive(contacts, user.id));
-      }
+      const cand = buildDialerNovoQueueSqls(db, user, { skipAnsweredCooldown: false });
 
       const result = await db
         .select()
         .from(contacts)
         .where(and(...cand))
+        .orderBy(sql`RAND()`)
         .limit(1);
 
       if (result.length === 0) return null;
@@ -1961,7 +2272,11 @@ Regras:
       if (!db) return [];
       const user = ctx.user as any;
       const tcond = whereContactsForUser(user);
-      const parts: SQL[] = [eq(contacts.status, "nao_atende"), sql`${contacts.attempts} >= 3`];
+      const parts: SQL[] = [
+        eq(contacts.status, "nao_atende"),
+        sql`${contacts.attempts} >= 3`,
+        eq(contacts.isVodafoneClient, false),
+      ];
       if (tcond) parts.unshift(tcond);
       if (user?.crmRole === "vendedor" && user?.id != null) {
         parts.push(sqlVendedorBypassManualExclusive(contacts, user.id));
@@ -1975,6 +2290,138 @@ Regras:
     }),
   }),
 
+  // ============ FEEDBACK PÓS-CHAMADA ============
+  feedback: router({
+    /** Nome preferido no spec; mesmo contrato que `submitAfterAnswered`. */
+    submitFeedback: protectedProcedure
+      .input(feedbackAfterAnsweredInputSchema)
+      .mutation(async ({ ctx, input }) => runFeedbackAfterAnsweredMutation(ctx, input)),
+    submitAfterAnswered: protectedProcedure
+      .input(feedbackAfterAnsweredInputSchema)
+      .mutation(async ({ ctx, input }) => runFeedbackAfterAnsweredMutation(ctx, input)),
+  }),
+
+  notifications: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      if (!user?.id) return [];
+      return await db
+        .select()
+        .from(crmNotifications)
+        .where(eq(crmNotifications.userId, user.id))
+        .orderBy(desc(crmNotifications.createdAt))
+        .limit(50);
+    }),
+
+    unreadCount: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return 0;
+      const user = ctx.user as any;
+      if (!user?.id) return 0;
+      const [row] = await db
+        .select({ n: count() })
+        .from(crmNotifications)
+        .where(and(eq(crmNotifications.userId, user.id), isNull(crmNotifications.readAt)));
+      return Number(row?.n ?? 0);
+    }),
+
+    markRead: protectedProcedure
+      .input(z.object({ id: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (!user?.id) throw new Error("Sessão inválida");
+        await db
+          .update(crmNotifications)
+          .set({ readAt: new Date() } as any)
+          .where(and(eq(crmNotifications.id, input.id), eq(crmNotifications.userId, user.id)));
+        return { ok: true as const };
+      }),
+
+    markAllRead: protectedProcedure.mutation(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Database not available");
+      const user = ctx.user as any;
+      if (!user?.id) throw new Error("Sessão inválida");
+      await db
+        .update(crmNotifications)
+        .set({ readAt: new Date() } as any)
+        .where(and(eq(crmNotifications.userId, user.id), isNull(crmNotifications.readAt)));
+      return { ok: true as const };
+    }),
+  }),
+
+  search: router({
+    global: protectedProcedure
+      .input(z.object({ q: z.string().min(1).max(80) }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return { contacts: [] as { id: number; name: string | null; phone: string | null; status: string | null }[] };
+        const user = ctx.user as any;
+        const cleaned = input.q.trim().replace(/[%_\\\\]/g, "");
+        if (cleaned.length === 0) return { contacts: [] };
+
+        const conditions: SQL[] = [
+          or(
+            and(sql`${contacts.name} IS NOT NULL`, like(contacts.name, `%${cleaned}%`)),
+            like(contacts.phone, `%${cleaned}%`),
+          ) as SQL,
+        ];
+
+        const tcond = whereContactsForUser(user);
+        if (tcond) conditions.push(tcond);
+
+        if (user?.crmRole === "vendedor") {
+          conditions.push(eq(contacts.assignedTo, user.id));
+          conditions.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+        }
+
+        const utid = user?.tenantId as number | undefined;
+        if (user?.crmRole === "ce" && utid != null) {
+          conditions.push(
+            sql`NOT (
+              ${contacts.status} IN ('novo', 'em_contacto')
+              AND ${contacts.addedBy} IS NOT NULL
+              AND ${contacts.addedBy} = ${contacts.assignedTo}
+              AND ${contacts.addedBy} IN (
+                SELECT id FROM users WHERE crmRole IN ('vendedor', 'cej') AND tenantId = ${utid}
+              )
+            )`,
+          );
+        }
+        if (user?.crmRole === "cej" && utid != null) {
+          conditions.push(
+            sql`NOT (
+              ${contacts.status} IN ('novo', 'em_contacto')
+              AND ${contacts.addedBy} IS NOT NULL
+              AND ${contacts.addedBy} = ${contacts.assignedTo}
+              AND ${contacts.addedBy} <> ${user.id}
+              AND ${contacts.addedBy} IN (
+                SELECT id FROM users WHERE crmRole IN ('vendedor', 'cej') AND tenantId = ${utid}
+              )
+            )`,
+          );
+        }
+
+        const rows = await db
+          .select({
+            id: contacts.id,
+            name: contacts.name,
+            phone: contacts.phone,
+            status: contacts.status,
+          })
+          .from(contacts)
+          .where(and(...conditions))
+          .orderBy(desc(contacts.createdAt))
+          .limit(20);
+
+        return { contacts: rows };
+      }),
+  }),
+
   // ============ DIALER ============
   dialer: router({
     next: protectedProcedure.query(async ({ ctx }) => {
@@ -1982,7 +2429,7 @@ Regras:
       if (!db) return null;
       const user = ctx.user as any;
       if (!canUseDialer(user)) {
-        throw new Error("Discador disponível para vendedores e chefes de equipa.");
+        throw new Error("Discador disponível para vendedores, chefes de equipa e coordenadores.");
       }
 
       // 1) Vendedores: priorizar pendentes próprios em atraso
@@ -1996,6 +2443,8 @@ Regras:
         ];
         if (pT) dueWhere.push(pT);
         if (user?.id != null) dueWhere.push(sqlVendedorBypassManualExclusive(contacts, user.id));
+        dueWhere.push(eq(contacts.isVodafoneClient, false));
+        dueWhere.push(dialerBlacklistExcludeSql(db));
 
         const due = await db
           .select({ pendente: pendentes })
@@ -2020,25 +2469,13 @@ Regras:
         }
       }
 
-      // 2) Fila aleatória (novo + cooldown 30 dias)
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      const dq: SQL[] = [
-        eq(contacts.status, "novo"),
-        or(
-          sql`${contacts.lastAssignedAt} IS NULL`,
-          sql`${contacts.lastAssignedAt} < ${thirtyDaysAgo}`,
-        ) as SQL,
-      ];
-      const dtc = whereContactsForUser(user);
-      if (dtc) dq.unshift(dtc);
-      if (user?.crmRole === "vendedor" && user?.id != null) {
-        dq.push(sqlVendedorBypassManualExclusive(contacts, user.id));
-      }
+      // 2) Fila aleatória: novo, não Vodafone, sem chamada atendida pelo utilizador nos últimos 30 dias
+      const dq = buildDialerNovoQueueSqls(db, user, { skipAnsweredCooldown: false });
       const result = await db
         .select()
         .from(contacts)
         .where(and(...dq))
+        .orderBy(sql`RAND()`)
         .limit(1);
       if (result.length === 0) return null;
 
@@ -2060,21 +2497,19 @@ Regras:
     }),
 
     outcome: protectedProcedure
-      .input(z.object({
-        contactId: z.number(),
-        outcome: z.enum(["atendeu", "nao_atende"]),
-        notes: z.string().optional(),
-        // for atendeu
-        disposition: z.enum(["lead", "pendente"]).optional(),
-        pendenteReturnDate: z.string().optional(),
-        pendenteNotes: z.string().optional(),
-      }))
+      .input(
+        z.object({
+          contactId: z.number(),
+          outcome: z.literal("nao_atende"),
+          notes: z.string().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
         if (!canUseDialer(user)) {
-          throw new Error("Discador disponível para vendedores e chefes de equipa.");
+          throw new Error("Discador disponível para vendedores, chefes de equipa e coordenadores.");
         }
 
         await assertContactAccessible(db, input.contactId, user);
@@ -2082,49 +2517,16 @@ Regras:
         await db.insert(callLogs).values({
           contactId: input.contactId,
           vendedorId: user?.id,
-          outcome: input.outcome as any,
+          outcome: "nao_atende",
           notes: input.notes || null,
         });
 
-        if (input.outcome === "nao_atende") {
-          await db.update(contacts).set({
-            status: "nao_atende",
-            attempts: sql`attempts + 1`,
-            lastAttemptAt: new Date(),
-          }).where(eq(contacts.id, input.contactId));
-        } else {
-          // atendeu requires disposition
-          if (!input.disposition) throw new Error("Selecione Lead ou Pendente");
+        await db.update(contacts).set({
+          status: "nao_atende",
+          attempts: sql`attempts + 1`,
+          lastAttemptAt: new Date(),
+        }).where(eq(contacts.id, input.contactId));
 
-          if (input.disposition === "lead") {
-            await db.update(contacts).set({
-              status: "em_contacto",
-              isLead: true,
-              notes: input.notes || null,
-              lastAttemptAt: new Date(),
-              attempts: sql`attempts + 1`,
-            } as any).where(eq(contacts.id, input.contactId));
-          } else {
-            if (!input.pendenteReturnDate) throw new Error("Defina data de retorno");
-            await db.insert(pendentes).values({
-              contactId: input.contactId,
-              vendedorId: user?.id,
-              returnDate: new Date(input.pendenteReturnDate),
-              notes: input.pendenteNotes || input.notes || null,
-              offerDesired: null,
-              status: "agendado",
-              priorityLevel: 3,
-            } as any);
-            await db.update(contacts).set({
-              status: "pendente",
-              lastAttemptAt: new Date(),
-              attempts: sql`attempts + 1`,
-              notes: input.notes || null,
-            } as any).where(eq(contacts.id, input.contactId));
-          }
-        }
-
-        // Clear current dialer contact -> forces next ping
         await db.update(users).set({
           dialerState: "idle",
           dialerContactId: null,
@@ -2254,7 +2656,9 @@ Regras:
             parts.push(eq(blacklist.tenantId, scope));
           }
 
-          if (user?.crmRole === "ce") {
+          if (user?.crmRole === "ce" && user?.companyId != null) {
+            parts.push(eq(blacklist.companyId, Number(user.companyId)));
+          } else if (user?.crmRole === "ce") {
             const teamScope = await resolveUserTeamScopeId(db, {
               id: user.id,
               teamId: user.teamId ?? null,
@@ -2301,12 +2705,13 @@ Regras:
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
-        const { tenantId: tidIns, teamId: teamIns } = await blacklistTeamScopeForInsert(db, user);
+        const { tenantId: tidIns, teamId: teamIns, companyId: companyIns } = await blacklistTeamScopeForInsert(db, user);
 
         await db.insert(blacklist).values({
           phone: input.phone.trim(),
           tenantId: tidIns,
           teamId: teamIns,
+          companyId: companyIns,
           reason: input.reason || null,
           addedBy: user?.id,
         } as any);
@@ -2755,9 +3160,9 @@ Regras:
 
       const parts: SQL[] = [
         eq(sales.status, "activo"),
-        sql`${sales.installationDate} IS NOT NULL`,
-        sql`MONTH(${sales.installationDate}) = ${mo}`,
-        sql`YEAR(${sales.installationDate}) = ${yr}`,
+        sql`(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) IS NOT NULL`,
+        sql`MONTH(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${mo}`,
+        sql`YEAR(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${yr}`,
       ];
       if (tenantV) parts.push(tenantV);
 
@@ -2773,14 +3178,16 @@ Regras:
       if (!counts.length) return [];
 
       const ids = counts.map(c => c.userId);
-      const nameRows = await db.select({ id: users.id, name: users.name }).from(users)
+      const nameRows = await db.select({ id: users.id, name: users.name, avatarUrl: users.avatarUrl }).from(users)
         .where(inArray(users.id, ids));
       const nameMap = Object.fromEntries(nameRows.map(r => [r.id, r.name]));
+      const avatarMap = Object.fromEntries(nameRows.map(r => [r.id, r.avatarUrl ?? null]));
 
       return counts.map((c, position) => ({
         position: position + 1,
         userId: c.userId,
         userName: nameMap[c.userId] || `Utilizador #${c.userId}`,
+        avatarUrl: avatarMap[c.userId] ?? null,
         activoSales: Number(c.activoSales),
         points: Number(c.activoSales),
         totalSales: Number(c.activoSales),
@@ -2912,7 +3319,23 @@ Regras:
       .input(
         z
           .object({
-            status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).optional(),
+            status: z
+              .enum([
+                "aguarda_instalacao",
+                "em_aberto",
+                "activo",
+                "e_switch",
+                "cancelado",
+                "pendente",
+                "nao_fechou",
+              ])
+              .optional(),
+            contactId: z.number().int().positive().optional(),
+            createdFrom: z.string().optional(),
+            createdTo: z.string().optional(),
+            activatedFrom: z.string().optional(),
+            activatedTo: z.string().optional(),
+            limit: z.number().int().min(1).max(500).optional(),
           })
           .optional(),
       )
@@ -2926,8 +3349,36 @@ Regras:
         if (vcond) parts.push(vcond);
         const cten = whereContactsForUser(user);
         if (cten) parts.push(cten);
+        if (input?.contactId != null) parts.push(eq(sales.contactId, input.contactId));
         if (input?.status) parts.push(eq(sales.status, input.status));
         else parts.push(sql`${sales.status} <> 'cancelado'`);
+
+        if (input?.createdFrom?.trim()) {
+          const d = new Date(input.createdFrom);
+          if (!Number.isNaN(d.getTime())) parts.push(gte(sales.createdAt, d));
+        }
+        if (input?.createdTo?.trim()) {
+          const d = new Date(input.createdTo);
+          if (!Number.isNaN(d.getTime())) {
+            d.setHours(23, 59, 59, 999);
+            parts.push(lte(sales.createdAt, d));
+          }
+        }
+        if (input?.activatedFrom?.trim()) {
+          const d = new Date(input.activatedFrom);
+          if (!Number.isNaN(d.getTime())) {
+            parts.push(sql`COALESCE(${sales.dataAtivacao}, ${sales.installationDate}) >= ${d}`);
+          }
+        }
+        if (input?.activatedTo?.trim()) {
+          const d = new Date(input.activatedTo);
+          if (!Number.isNaN(d.getTime())) {
+            d.setHours(23, 59, 59, 999);
+            parts.push(sql`COALESCE(${sales.dataAtivacao}, ${sales.installationDate}) <= ${d}`);
+          }
+        }
+
+        const lim = input?.limit != null ? Math.min(500, input.limit) : 300;
         const saleVendedor = alias(users, "sale_vendedor");
         const rows = await db
           .select({
@@ -2941,7 +3392,7 @@ Regras:
           .leftJoin(saleVendedor, eq(sales.vendedorId, saleVendedor.id))
           .where(and(...parts))
           .orderBy(desc(sales.updatedAt))
-          .limit(300);
+          .limit(lim);
         return rows.map((r) => ({
           ...r.sale,
           contactName: r.contactName,
@@ -3021,8 +3472,9 @@ Regras:
     update: protectedProcedure
       .input(z.object({
         saleId: z.number(),
-        status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).optional(),
+        status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado", "pendente", "nao_fechou"]).optional(),
         installationDate: z.string().optional().nullable(),
+        dataAtivacao: z.string().optional().nullable(),
         cancelReason: z.string().optional().nullable(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -3044,13 +3496,24 @@ Regras:
         if (input.installationDate !== undefined) {
           patch.installationDate = input.installationDate ? new Date(input.installationDate) : null;
         }
+        if (input.dataAtivacao !== undefined) {
+          patch.dataAtivacao = input.dataAtivacao ? new Date(input.dataAtivacao) : null;
+        }
         const nextStatus = input.status !== undefined ? input.status : s.status;
         const nextInstallationDate =
           input.installationDate !== undefined
             ? (input.installationDate ? new Date(input.installationDate) : null)
             : s.installationDate;
-        if (nextStatus === "activo" && !nextInstallationDate) {
-          throw new Error("Defina a data de instalação ao marcar como Activo");
+        const nextDataAtivacao =
+          input.dataAtivacao !== undefined
+            ? (input.dataAtivacao ? new Date(input.dataAtivacao) : null)
+            : (s as { dataAtivacao?: Date | null }).dataAtivacao ?? null;
+        if (
+          nextStatus === "activo" &&
+          !nextInstallationDate &&
+          (!nextDataAtivacao || Number.isNaN(new Date(nextDataAtivacao as Date).getTime()))
+        ) {
+          throw new Error("Defina a data de instalação ou a data de activação ao marcar como Activo");
         }
         await db.update(sales).set(patch as any).where(eq(sales.id, input.saleId));
 
@@ -3077,6 +3540,34 @@ Regras:
           details: `Atualizou venda #${input.saleId}`,
         });
         return { success: true };
+      }),
+
+    /** Marca venda como Activa com data de activação = agora (vendedor próprio ou gestão). */
+    activateService: protectedProcedure
+      .input(z.object({ saleId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+        if (user?.crmRole === "vendedor" && Number(s.vendedorId) !== Number(user.id)) {
+          throw new Error("Só pode activar as suas vendas.");
+        }
+        const now = new Date();
+        await db
+          .update(sales)
+          .set({ status: "activo", dataAtivacao: now } as any)
+          .where(eq(sales.id, input.saleId));
+        await db.insert(auditLogs).values({
+          userId: user?.id,
+          action: "sale_activated",
+          entity: "sale",
+          entityId: input.saleId,
+          details: `Activou serviço (data activação automática)`,
+        });
+        return { success: true as const };
       }),
 
     /** Ficha de contrato / dados para exportação — todos os campos opcionais. */
@@ -3117,7 +3608,18 @@ Regras:
       .input(
         z
           .object({
-            status: z.enum(["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado", "__all"]).optional(),
+            status: z
+              .enum([
+                "aguarda_instalacao",
+                "em_aberto",
+                "activo",
+                "e_switch",
+                "cancelado",
+                "pendente",
+                "nao_fechou",
+                "__all",
+              ])
+              .optional(),
           })
           .optional(),
       )
@@ -3153,12 +3655,16 @@ Regras:
           .limit(5000);
 
         const headers = [
-          "SALE_ID",
+          "SALE_DB_ID",
+          "SALE_PUBLIC_ID",
           "VENDEDOR",
           "PRODUTO",
           "ESTADO",
           "CONTACTO_NOME",
           "CONTACTO_TEL",
+          "DATA_ATIVACAO",
+          "ANTIGO_TITULAR_NOME",
+          "ANTIGO_TITULAR_NIF",
           ...SALE_CONTRACT_DOSSIER_FIELDS.map((f) => f.label),
         ];
 
@@ -3174,13 +3680,21 @@ Regras:
         for (const r of rows as any[]) {
           const sale = r.sale as any;
           const dossier = parseSaleContractDossier(sale.saleContractDossier ?? null);
+          const dataAtiv =
+            sale.dataAtivacao != null
+              ? new Date(sale.dataAtivacao).toISOString()
+              : "";
           const base = [
             sale.id,
+            sale.publicSaleId ?? "",
             r.vendedorName ?? `#${sale.vendedorId}`,
             sale.product,
             sale.status,
             r.contactName ?? "",
             r.contactPhone ?? "",
+            dataAtiv,
+            sale.antigoTitularNome ?? "",
+            sale.antigoTitularNif ?? "",
           ];
           const extra = SALE_CONTRACT_DOSSIER_FIELDS.map((f) => dossier[f.key] ?? "");
           lines.push([...base, ...extra].map(csvEscape).join(";"));

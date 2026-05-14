@@ -8,8 +8,9 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { trpc } from "@/lib/trpc";
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { toast } from "sonner";
+import { useSearch } from "wouter";
 
 function startOfDay(d: Date) {
   const x = new Date(d);
@@ -24,14 +25,35 @@ function addDays(d: Date, days: number) {
 }
 
 export default function Calendario() {
+  const search = useSearch();
   const [selectedDate, setSelectedDate] = useState<Date>(() => startOfDay(new Date()));
   const [showDialog, setShowDialog] = useState(false);
+  const [prefillContactId, setPrefillContactId] = useState<number | null>(null);
   const [form, setForm] = useState({
     title: "",
     description: "",
     type: "geral",
     allDay: true,
   });
+
+  useEffect(() => {
+    const idStr = new URLSearchParams(search).get("contactId");
+    if (!idStr) {
+      setPrefillContactId(null);
+      return;
+    }
+    const id = parseInt(idStr, 10);
+    if (!Number.isFinite(id) || id < 1) {
+      setPrefillContactId(null);
+      return;
+    }
+    setPrefillContactId(id);
+    setForm((s) => ({
+      ...s,
+      title: s.title.trim() ? s.title : `Follow-up contacto #${id}`,
+    }));
+    setShowDialog(true);
+  }, [search]);
 
   const range = useMemo(() => {
     const from = startOfDay(selectedDate);
@@ -48,6 +70,7 @@ export default function Calendario() {
     onSuccess: async () => {
       toast.success("Evento criado");
       setShowDialog(false);
+      setPrefillContactId(null);
       setForm({ title: "", description: "", type: "geral", allDay: true });
       await eventsQuery.refetch();
     },
@@ -102,9 +125,14 @@ export default function Calendario() {
                         <Input
                           value={form.title}
                           onChange={(e) => setForm((s) => ({ ...s, title: e.target.value }))}
-                          placeholder="Ex: Follow-up cliente"
+                          placeholder="Ex.: Follow-up cliente"
                         />
                       </div>
+                      {prefillContactId != null ? (
+                        <p className="text-xs text-muted-foreground">
+                          Vinculado ao contacto <span className="font-mono text-foreground">#{prefillContactId}</span>
+                        </p>
+                      ) : null}
                       <div className="space-y-2">
                         <Label>Tipo</Label>
                         <Select value={form.type} onValueChange={(v) => setForm((s) => ({ ...s, type: v }))}>
@@ -136,6 +164,7 @@ export default function Calendario() {
                             startAt: range.from.toISOString(),
                             endAt: undefined,
                             allDay: true,
+                            contactId: prefillContactId ?? undefined,
                           } as any)
                         }
                       >
