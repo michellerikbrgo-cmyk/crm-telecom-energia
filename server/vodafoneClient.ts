@@ -23,7 +23,7 @@ export async function applyAutomaticVodafoneClientIfNeeded(db: Db, contactId: nu
   if (!row.isVodafoneClient) {
     const patch: Record<string, unknown> = { isVodafoneClient: true };
     const st = String(row.status);
-    if (st === "novo" || st === "em_contacto" || st === "nao_atende") {
+    if (st === "novo" || st === "nao_atende") {
       patch.status = "sem_interesse";
       patch.lossReason = row.lossReason || VODAFONE_LOSS;
       patch.assignedTo = null;

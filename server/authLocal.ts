@@ -3,10 +3,16 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { getDb } from "./db";
-import { companies, teams, users } from "../drizzle/schema";
-import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { auditLogs, companies, teams, users } from "../drizzle/schema";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/mysql-core";
-import { isSuperAdminUser, resolveUserTeamScopeId, whereUsersForUser } from "./tenantScope";
+import { isSuperAdminUser } from "./tenantScope";
+import {
+  assertCanManageEquipaMember,
+  buildEquipaMembersWhere,
+  canAccessEquipaHub,
+  truthyFlag,
+} from "./equipaHubScope";
 import bcrypt from "bcryptjs";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
@@ -22,15 +28,8 @@ import {
   getRootCompanyForCoordinator,
 } from "./companyHierarchy";
 
-/** MySQL às vezes devolve 0/1 em vez de boolean. */
-function truthyFlag(v: unknown): boolean {
-  return v === true || v === 1 || v === "1";
-}
-
 function canListUsersDirectory(u: Record<string, unknown> | null | undefined): boolean {
-  if (!u) return false;
-  if (truthyFlag(u.isSuperAdmin)) return true;
-  return ["ce", "coordenador", "cej"].includes(String(u.crmRole || ""));
+  return canAccessEquipaHub(u);
 }
 
 /** Cada nível só cria cargos estritamente mais baixos (inferior hierárquico). Super admin não passa aqui (cria todos). */
@@ -368,82 +367,47 @@ export const authLocalRouter = router({
       teamId: users.teamId,
     };
 
-    if (isSuperAdminUser(currentUser)) {
-      const tenantWhere = whereUsersForUser(currentUser);
-      let q = db
-        .select(baseSelect)
-        .from(users)
-        .leftJoin(coordinator, eq(coordinator.id, users.tenantId));
-      if (tenantWhere) q = (q as any).where(tenantWhere);
-      return await q;
-    }
+    const visibility = buildEquipaMembersWhere(currentUser);
+    let q = db
+      .select(baseSelect)
+      .from(users)
+      .leftJoin(coordinator, eq(coordinator.id, users.tenantId));
+    if (visibility.length) q = (q as any).where(and(...visibility));
+    return await q;
+  }),
 
-    const role = String(currentUser.crmRole || "");
-    const uid = Number(currentUser.id);
+  listEquipaMembers: protectedProcedure.query(async ({ ctx }) => {
+    const db = await getDb();
+    if (!db) return [];
+    const currentUser = ctx.user as Record<string, unknown>;
+    if (!canAccessEquipaHub(currentUser)) return [];
 
-    if (role === "coordenador") {
-      const tid =
-        currentUser.tenantId != null && !Number.isNaN(Number(currentUser.tenantId))
-          ? Number(currentUser.tenantId)
-          : uid;
-      return await db
-        .select(baseSelect)
-        .from(users)
-        .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
-        .where(eq(users.tenantId, tid));
-    }
+    const visibility = buildEquipaMembersWhere(currentUser);
+    const rows = await db
+      .select({
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        crmRole: users.crmRole,
+        isSuperAdmin: (users as any).isSuperAdmin,
+        bloqueado: users.bloqueado,
+        isOnline: users.isOnline,
+        dialerState: users.dialerState,
+        teamId: users.teamId,
+        nif: users.nif,
+        sfid: users.sfid,
+        teamLeaderJuniorId: users.teamLeaderJuniorId,
+        dailyCallsGoal: teams.dailyCallsGoal,
+      })
+      .from(users)
+      .leftJoin(teams, eq(users.teamId, teams.id))
+      .where(visibility.length ? and(...visibility) : undefined)
+      .orderBy(users.name);
 
-    const tenantIdNum =
-      currentUser.tenantId != null ? Number(currentUser.tenantId) : NaN;
-    if (Number.isNaN(tenantIdNum)) {
-      return [];
-    }
-
-    if (role === "ce") {
-      const scopeId = await resolveUserTeamScopeId(db, {
-        id: uid,
-        teamId: (currentUser as { teamId?: number | null }).teamId ?? null,
-        crmRole: "ce",
-      });
-      if (scopeId == null) return [];
-      const myCcid = (currentUser as { companyId?: number | null }).companyId;
-      const companyPart =
-        myCcid != null && !Number.isNaN(Number(myCcid)) ? eq(users.companyId, Number(myCcid)) : undefined;
-      const hierarchyCond = or(
-        eq(users.id, uid),
-        and(eq(users.teamId, scopeId), inArray(users.crmRole, ["vendedor", "cej"])),
-      );
-      const parts = [eq(users.tenantId, tenantIdNum), hierarchyCond, companyPart].filter(Boolean) as any[];
-      return await db
-        .select(baseSelect)
-        .from(users)
-        .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
-        .where(and(...parts));
-    }
-
-    if (role === "cej") {
-      const scopeId = await resolveUserTeamScopeId(db, {
-        id: uid,
-        teamId: (currentUser as { teamId?: number | null }).teamId ?? null,
-        crmRole: "cej",
-      });
-      if (scopeId == null) return [];
-      const myCcid = (currentUser as { companyId?: number | null }).companyId;
-      const companyPart =
-        myCcid != null && !Number.isNaN(Number(myCcid)) ? eq(users.companyId, Number(myCcid)) : undefined;
-      const hierarchyCond = or(
-        eq(users.id, uid),
-        and(eq(users.teamId, scopeId), eq(users.crmRole, "vendedor")),
-      );
-      const parts = [eq(users.tenantId, tenantIdNum), hierarchyCond, companyPart].filter(Boolean) as any[];
-      return await db
-        .select(baseSelect)
-        .from(users)
-        .leftJoin(coordinator, eq(coordinator.id, users.tenantId))
-        .where(and(...parts));
-    }
-
-    return [];
+    return rows.map((r) => ({
+      ...r,
+      dailyCallsGoal: r.dailyCallsGoal ?? 80,
+    }));
   }),
 
   updateUser: protectedProcedure
@@ -469,33 +433,20 @@ export const authLocalRouter = router({
       const [target] = await db.select().from(users).where(eq(users.id, input.id)).limit(1);
       if (!target) throw new Error("Utilizador não encontrado");
 
-      if (!isSuperAdminUser(currentUser)) {
-        const role = String(currentUser.crmRole || "");
-        const tid =
-          currentUser.tenantId != null
-            ? Number(currentUser.tenantId)
-            : role === "coordenador"
-              ? Number(currentUser.id)
-              : NaN;
-        if (Number.isNaN(tid) || Number(target.tenantId) !== tid) {
-          throw new Error("Utilizador de outra empresa.");
-        }
-        if (role === "cej" && target.crmRole !== "vendedor") {
-          throw new Error("CEJ só pode editar vendedores da sua equipa.");
-        }
-        if (role === "ce" && !["vendedor", "cej"].includes(String(target.crmRole))) {
-          throw new Error("CE só pode editar vendedores e CEJ da sua equipa.");
-        }
-        if (role === "coordenador" && target.crmRole === "coordenador" && target.id !== currentUser.id) {
-          throw new Error("Não pode editar outro coordenador.");
-        }
-      }
+      await assertCanManageEquipaMember(db, currentUser, target as any);
 
       const patch: Record<string, unknown> = {};
       if (input.name !== undefined) patch.name = input.name.trim();
       if (input.nif !== undefined) patch.nif = input.nif;
       if (input.sfid !== undefined) patch.sfid = input.sfid;
-      if (input.bloqueado !== undefined) patch.bloqueado = input.bloqueado;
+      if (input.bloqueado !== undefined) {
+        patch.bloqueado = input.bloqueado;
+        if (input.bloqueado) {
+          patch.isOnline = false;
+          patch.dialerState = "idle";
+          (patch as { dialerContactId?: null }).dialerContactId = null;
+        }
+      }
       if (input.teamLeaderJuniorId !== undefined) {
         if (String(target.crmRole) !== "vendedor") {
           throw new Error("CEJ só se aplica a vendedores.");
@@ -523,6 +474,20 @@ export const authLocalRouter = router({
       if (Object.keys(patch).length === 0) return { success: true };
 
       await db.update(users).set(patch as any).where(eq(users.id, input.id));
+
+      if (input.bloqueado !== undefined) {
+        await db.insert(auditLogs).values({
+          userId: Number(currentUser.id),
+          action: input.bloqueado ? "user_blocked" : "user_unblocked",
+          entity: "users",
+          entityId: input.id,
+          details: JSON.stringify({
+            targetEmail: target.email,
+            targetName: target.name,
+          }),
+        });
+      }
+
       return { success: true };
     }),
 

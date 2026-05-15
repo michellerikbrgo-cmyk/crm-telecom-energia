@@ -4,23 +4,23 @@ import { isSuperAdminUser, whereContactsForUser } from "./tenantScope";
 
 export const CONTACT_STATUS_VALUES = [
   "novo",
-  "em_contacto",
   "pendente",
   "venda",
   "nao_atende",
   "sem_interesse",
   "blacklist",
-  "outros",
   "sem_cobertura_fibra",
-  "fidelizado",
+  "vodafone_client",
 ] as const;
 
-export type ContactStatusValue = (typeof CONTACT_STATUS_VALUES)[number];
+export type ContactFilterStatusValue = (typeof CONTACT_STATUS_VALUES)[number];
+export type ContactStatusValue = Exclude<ContactFilterStatusValue, "vodafone_client">;
 
 /** UI "fechado" mapeia para venda (sem enum dedicado na BD). */
 export function resolveContactStatusFilter(status?: string): string | undefined {
   if (!status || status === "todos") return undefined;
   if (status === "fechado") return "venda";
+  if (status === "vodafone_client") return "vodafone_client";
   return status;
 }
 
@@ -53,7 +53,9 @@ export function buildContactsListConditions(
   }
 
   const resolvedStatus = resolveContactStatusFilter(input?.status);
-  if (resolvedStatus) {
+  if (resolvedStatus === "vodafone_client") {
+    conditions.push(eq(contacts.isVodafoneClient, true));
+  } else if (resolvedStatus) {
     conditions.push(eq(contacts.status, resolvedStatus as ContactStatusValue));
   }
 
@@ -72,7 +74,7 @@ export function buildContactsListConditions(
   if (crmRole === "ce" && utid != null) {
     conditions.push(
       sql`NOT (
-        ${contacts.status} IN ('novo', 'em_contacto')
+        ${contacts.status} IN ('novo')
         AND ${contacts.addedBy} IS NOT NULL
         AND ${contacts.addedBy} = ${contacts.assignedTo}
         AND ${contacts.addedBy} IN (
@@ -85,7 +87,7 @@ export function buildContactsListConditions(
   if (crmRole === "cej" && utid != null && uid) {
     conditions.push(
       sql`NOT (
-        ${contacts.status} IN ('novo', 'em_contacto')
+        ${contacts.status} IN ('novo')
         AND ${contacts.addedBy} IS NOT NULL
         AND ${contacts.addedBy} = ${contacts.assignedTo}
         AND ${contacts.addedBy} <> ${uid}
@@ -99,12 +101,10 @@ export function buildContactsListConditions(
   return conditions;
 }
 
+/** @deprecated usar canExportContactsInventory em contactsInventory.ts */
 export function canExportContacts(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
-  return !!(
-    u?.isSuperAdmin ||
-    ["cej", "ce", "coordenador", "vendedor"].includes(u?.crmRole || "")
-  );
+  return !!(u?.isSuperAdmin || u?.crmRole === "ce" || u?.crmRole === "coordenador");
 }
 
 export function canManageUserDirectory(user: unknown): boolean {

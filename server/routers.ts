@@ -29,6 +29,7 @@ import {
   featureSuggestions,
   featureSuggestionEdits,
   contactSubcontacts,
+  callFeedback,
   crmNotifications,
   fidelizacoesTerminando,
   motivosNaoFechamento,
@@ -69,7 +70,18 @@ import {
   whereUsersForUser,
   whereInTenantUserIds,
 } from "./tenantScope";
-import { buildContactsListConditions, canExportContacts } from "./contactListScope";
+import { buildContactsListConditions } from "./contactListScope";
+import {
+  buildContactsExportCsv,
+  canAccessContactsInventory,
+  canExportContactsInventory,
+  fetchContactsInventoryList,
+} from "./contactsInventory";
+import { CONTACT_EXPORT_COLUMNS, type ContactExportColumnKey } from "../shared/contactsExport";
+import { generateUniquePublicPendingId } from "./pendingPublicId";
+import { getPendenteVendedorIdsForUser } from "./pendentesScope";
+import { generateUniquePublicSaleId } from "./salePublicId";
+import { generateContractPdfZip } from "./contractPdf";
 import { storagePut } from "./storage";
 import {
   decryptText,
@@ -87,6 +99,19 @@ import {
 import { applyAutomaticVodafoneClientIfNeeded, batchApplyVodafoneAutomationAfterBulk } from "./vodafoneClient";
 import { dialerBlacklistExcludeSql, dialerStatusEligibleSql, executeSubmitAfterAnsweredCall } from "./feedbackAfterCall";
 import { readReleaseLogMerged } from "./releaseLogStore";
+import { readDeployStatus, startDeployPm2 } from "./deployPm2Runner";
+import {
+  parseDateOnlyYmd,
+  pendentesReturnDateFromCondition,
+  pendentesReturnDateToCondition,
+} from "./pendentesDateFilter";
+import { readDbSyncStatus, startDbSync } from "./dbSyncRunner";
+import {
+  listBackupInventory,
+  startDatabaseBackup,
+  startSystemBackup,
+} from "./backupRunner";
+import { readBackupDatabaseStatus, readBackupSystemStatus } from "./adminJobStatus";
 import { createPaymentCheckoutUrl } from "./payments/createCheckout";
 import { getAppPublicUrl } from "./payments/appBaseUrl";
 import { dedupeSnippetsByUrl, searchWebTavily } from "./_core/webSearch";
@@ -112,13 +137,7 @@ function canSubmitCallFeedback(user: unknown): boolean {
 }
 
 function canEditContactsAsManager(user: unknown): boolean {
-  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
-  return !!(
-    u?.isSuperAdmin ||
-    u?.crmRole === "cej" ||
-    u?.crmRole === "ce" ||
-    u?.crmRole === "coordenador"
-  );
+  return canAccessContactsInventory(user);
 }
 
 function canManageSalesLifecycle(user: unknown): boolean {
@@ -561,55 +580,65 @@ const ROLEPLAY_SYSTEM_PREFIX =
   "Não escreva meta-comentários (ex.: «Como cliente digo…»). Responda só com a fala do cliente: uma ou duas frases curtas. " +
   "Pode objectar ao preço, fidelização, comparar com MEO/NOS, ou hesitar. Se o vendedor for convincente, pode ceder um pouco.";
 
-const feedbackAfterAnsweredInputSchema = z
-  .object({
-    contactId: z.number(),
-    destination: z.enum([
-      "none",
-      "no_interest",
-      "vodafone_client",
-      "other",
-      "no_fiber_coverage",
-      "fidelizado",
-      "lead",
-      "pendente",
-    ]),
-    observacoes: z.string().optional(),
-    pendenteReturnDate: z.string().optional(),
-    fidelEndDate: z.string().min(1, "Data de fidelização obrigatória."),
-    operadora: z.enum(["NOS", "MEO", "NOWO", "DIGI", "WOO", "AMIGO", "UZO"]).optional(),
-    pendentePriorityLevel: z.coerce.number().int().min(1).max(5).optional(),
-    pendenteSaleDetail: z.record(z.string(), z.string()).optional(),
-    titularTroca: z.boolean().optional(),
-    antigoTitularNome: z.string().optional(),
-    antigoTitularNif: z.string().optional(),
-    preAgendamentoAt: z.string().optional(),
-  })
-  .superRefine((d, ctx) => {
-    if (d.destination === "pendente" && !String(d.pendenteReturnDate ?? "").trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Defina a data de retorno para o pendente.",
-        path: ["pendenteReturnDate"],
-      });
-    }
-    if (d.titularTroca) {
-      if (!String(d.antigoTitularNome ?? "").trim()) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Nome do antigo titular obrigatório.",
-          path: ["antigoTitularNome"],
-        });
-      }
-      if (!String(d.antigoTitularNif ?? "").trim()) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "NIF do antigo titular obrigatório.",
-          path: ["antigoTitularNif"],
-        });
-      }
-    }
-  });
+/** Liberta a sessão do discador após pendente/venda criados no modal (tracer + desatribuição). */
+async function finalizeDialerSessionInTx(
+  tx: any,
+  user: { id: number },
+  contactId: number,
+  destination: "pendente" | "fechado_venda",
+  observacoes: string | null,
+) {
+  const [u] = await tx
+    .select({ dialerContactId: users.dialerContactId })
+    .from(users)
+    .where(eq(users.id, user.id))
+    .limit(1);
+  if (Number(u?.dialerContactId) !== contactId) {
+    throw new Error("Este contacto já não está activo no seu discador. Recarregue o discador.");
+  }
+  await tx.insert(callLogs).values({
+    contactId,
+    vendedorId: user.id,
+    outcome: "atendeu",
+    notes: observacoes,
+  } as any);
+  await tx.insert(callFeedback).values({
+    contactId,
+    userId: user.id,
+    destination,
+    observacoes,
+  } as any);
+  await tx
+    .update(users)
+    .set({
+      dialerState: "idle",
+      dialerContactId: null,
+      dialerUpdatedAt: new Date(),
+    } as any)
+    .where(eq(users.id, user.id));
+  await tx
+    .update(contacts)
+    .set({
+      assignedTo: null,
+      lastAssignedAt: null,
+      attempts: sql`${contacts.attempts} + 1`,
+      lastAttemptAt: new Date(),
+    } as any)
+    .where(eq(contacts.id, contactId));
+}
+
+const feedbackAfterAnsweredInputSchema = z.object({
+  contactId: z.number(),
+  destination: z.enum([
+    "nao_atende",
+    "no_interest",
+    "vodafone_client",
+    "no_fiber_coverage",
+    "lista_negra",
+  ]),
+  observacoes: z.string().optional(),
+  fidelEndDate: z.string().optional(),
+});
 
 async function runFeedbackAfterAnsweredMutation(
   ctx: { user?: unknown },
@@ -626,15 +655,7 @@ async function runFeedbackAfterAnsweredMutation(
     contactId: input.contactId,
     destination: input.destination,
     observacoes: input.observacoes,
-    pendenteReturnDate: input.pendenteReturnDate,
     fidelEndDate: input.fidelEndDate,
-    operadora: input.operadora ?? null,
-    pendentePriorityLevel: input.pendentePriorityLevel,
-    pendenteSaleDetail: input.pendenteSaleDetail,
-    titularTroca: input.titularTroca,
-    antigoTitularNome: input.antigoTitularNome,
-    antigoTitularNif: input.antigoTitularNif,
-    preAgendamentoAt: input.preAgendamentoAt,
   });
   return { success: true as const };
 }
@@ -673,7 +694,7 @@ export const appRouter = router({
     }),
     logout: publicProcedure.mutation(async ({ ctx }) => {
       const cookieOptions = getSessionCookieOptions(ctx.req);
-      ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
+      ctx.res.clearCookie(COOKIE_NAME, cookieOptions);
       const u = ctx.user as { id?: number } | null;
       if (u?.id) {
         const db = await getDb();
@@ -754,13 +775,9 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) return [];
-        const user = ctx.user as any;
-        const conditions = buildContactsListConditions(user, input);
-        let query = db.select().from(contacts);
-        if (conditions.length > 0) {
-          query = query.where(and(...conditions)) as any;
-        }
-        return await (query as any).orderBy(desc(contacts.createdAt)).limit(100);
+        const user = ctx.user as Record<string, unknown>;
+        if (!canAccessContactsInventory(user)) return [];
+        return fetchContactsInventoryList(db, user, input, 500);
       }),
 
     countByStatus: protectedProcedure
@@ -768,7 +785,8 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) return { total: 0, byStatus: {} as Record<string, number> };
-        const user = ctx.user as any;
+        const user = ctx.user as Record<string, unknown>;
+        if (!canAccessContactsInventory(user)) return { total: 0, byStatus: {} };
         const conditions = buildContactsListConditions(user, { search: input?.search });
         const base =
           conditions.length > 0
@@ -782,71 +800,52 @@ export const appRouter = router({
           byStatus[r.status] = n;
           total += n;
         }
+        const vfWhere =
+          conditions.length > 0
+            ? and(...conditions, eq(contacts.isVodafoneClient, true))
+            : eq(contacts.isVodafoneClient, true);
+        const [vfRow] = await db.select({ c: count() }).from(contacts).where(vfWhere);
+        byStatus.vodafone_client = Number(vfRow?.c ?? 0);
         return { total, byStatus };
       }),
 
     exportCsv: protectedProcedure
-      .input(z.object({ search: z.string().optional(), status: z.string().optional() }).optional())
+      .input(
+        z.object({
+          search: z.string().optional(),
+          status: z.string().optional(),
+          columns: z
+            .array(z.string())
+            .min(1)
+            .transform((cols) => {
+              const allowed = new Set(
+                CONTACT_EXPORT_COLUMNS.map((c) => c.key),
+              );
+              const filtered = cols.filter((c): c is ContactExportColumnKey =>
+                allowed.has(c as ContactExportColumnKey),
+              );
+              if (filtered.length === 0) {
+                throw new Error("Seleccione colunas válidas para exportar.");
+              }
+              return filtered;
+            }),
+        }),
+      )
       .query(async ({ ctx, input }) => {
-        if (!canExportContacts(ctx.user)) {
+        if (!canExportContactsInventory(ctx.user)) {
           throw new Error("Sem permissão para exportar contactos.");
         }
         const db = await getDb();
         if (!db) return { csv: "", count: 0 };
-        const user = ctx.user as any;
-        const conditions = buildContactsListConditions(user, input);
-        let query = db
-          .select({
-            id: contacts.id,
-            phone: contacts.phone,
-            name: contacts.name,
-            email: contacts.email,
-            status: contacts.status,
-            origin: contacts.origin,
-            listName: contacts.listName,
-            importBatchLabel: contacts.importBatchLabel,
-            createdAt: contacts.createdAt,
-          })
-          .from(contacts);
-        if (conditions.length > 0) {
-          query = query.where(and(...conditions)) as any;
-        }
-        const rows = await (query as any).orderBy(desc(contacts.createdAt)).limit(10_000);
-        const esc = (v: unknown) => {
-          const s = v == null ? "" : String(v);
-          if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-          return s;
-        };
-        const header = [
-          "id",
-          "telefone",
-          "nome",
-          "email",
-          "estado",
-          "origem",
-          "lista",
-          "lote_importacao",
-          "criado_em",
-        ];
-        const lines = [
-          header.join(","),
-          ...rows.map((r: Record<string, unknown>) =>
-            [
-              r.id,
-              r.phone,
-              r.name,
-              r.email,
-              r.status,
-              r.origin,
-              r.listName,
-              r.importBatchLabel,
-              r.createdAt,
-            ]
-              .map(esc)
-              .join(","),
-          ),
-        ];
-        return { csv: "\uFEFF" + lines.join("\n"), count: rows.length };
+        const user = ctx.user as Record<string, unknown>;
+        const rows = await fetchContactsInventoryList(
+          db,
+          user,
+          { search: input.search, status: input.status },
+          10_000,
+        );
+        const csv = buildContactsExportCsv(rows, input.columns);
+        return { csv, count: rows.length };
       }),
 
     searchPicker: protectedProcedure
@@ -1046,15 +1045,12 @@ export const appRouter = router({
         status: z
           .enum([
             "novo",
-            "em_contacto",
             "pendente",
             "venda",
             "nao_atende",
             "sem_interesse",
             "blacklist",
-            "outros",
             "sem_cobertura_fibra",
-            "fidelizado",
           ])
           .optional(),
       }))
@@ -1111,57 +1107,101 @@ export const appRouter = router({
 
   // ============ PENDENTES ============
   pendentes: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      const db = await getDb();
-      if (!db) return [];
-      const user = ctx.user as any;
+    list: protectedProcedure
+      .input(
+        z
+          .object({
+            returnDateFrom: z.string().optional(),
+            returnDateTo: z.string().optional(),
+            priorityLevel: z.number().int().min(1).max(5).optional(),
+            status: z
+              .enum(["agendado", "realizado", "expirado", "cancelado", "nao_fechou"])
+              .optional(),
+          })
+          .optional(),
+      )
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as Record<string, unknown>;
 
-      let conditions: any[] = [];
-      const pTenant = whereContactsForUser(user);
-      if (pTenant) conditions.push(pTenant);
+        const conditions: SQL[] = [];
+        const pTenant = whereContactsForUser(user);
+        if (pTenant) conditions.push(pTenant);
 
-      if (user?.crmRole === "vendedor") {
-        conditions.push(eq(pendentes.vendedorId, user.id));
-      } else {
-        const sellerIds = await getSellerIdsForPipelineScope(db, user);
+        const sellerIds = await getPendenteVendedorIdsForUser(db, user);
         const tenantPV = whereInTenantUserIds(sellerIds, pendentes.vendedorId);
         if (tenantPV) conditions.push(tenantPV);
-      }
 
-      let query = db.select({
-        id: pendentes.id,
-        contactId: pendentes.contactId,
-        vendedorId: pendentes.vendedorId,
-        returnDate: pendentes.returnDate,
-        notes: pendentes.notes,
-        offerDesired: pendentes.offerDesired,
-        status: pendentes.status,
-        motivoNaoFechamentoId: pendentes.motivoNaoFechamentoId,
-        notified: pendentes.notified,
-        priorityLevel: pendentes.priorityLevel,
-        createdAt: pendentes.createdAt,
-        updatedAt: pendentes.updatedAt,
-        contactName: contacts.name,
-        contactPhone: contacts.phone,
-      }).from(pendentes)
-        .leftJoin(contacts, eq(pendentes.contactId, contacts.id));
-      if (conditions.length > 0) {
-        query = query.where(and(...conditions)) as any;
-      }
+        if (input?.priorityLevel != null) {
+          conditions.push(eq(pendentes.priorityLevel, input.priorityLevel));
+        }
+        if (input?.status) conditions.push(eq(pendentes.status, input.status));
+        if (input?.returnDateFrom) {
+          const ymd = parseDateOnlyYmd(input.returnDateFrom);
+          if (ymd) conditions.push(pendentesReturnDateFromCondition(ymd));
+        }
+        if (input?.returnDateTo) {
+          const ymd = parseDateOnlyYmd(input.returnDateTo);
+          if (ymd) conditions.push(pendentesReturnDateToCondition(ymd));
+        }
 
-      return await (query as any)
-        .orderBy(desc(pendentes.priorityLevel), asc(pendentes.returnDate))
-        .limit(50);
-    }),
+        const vendedorUser = alias(users, "pendente_vendedor");
+        const criadorUser = alias(users, "pendente_criador");
+        let query = db
+          .select({
+            id: pendentes.id,
+            publicPendingId: pendentes.publicPendingId,
+            contactId: pendentes.contactId,
+            vendedorId: pendentes.vendedorId,
+            criadorId: pendentes.criadorId,
+            returnDate: pendentes.returnDate,
+            notes: pendentes.notes,
+            offerDesired: pendentes.offerDesired,
+            status: pendentes.status,
+            motivoNaoFechamentoId: pendentes.motivoNaoFechamentoId,
+            notified: pendentes.notified,
+            priorityLevel: pendentes.priorityLevel,
+            clientNif: pendentes.clientNif,
+            operadoraAtual: pendentes.operadoraAtual,
+            historicoChamada: pendentes.historicoChamada,
+            convertedSaleId: pendentes.convertedSaleId,
+            createdAt: pendentes.createdAt,
+            updatedAt: pendentes.updatedAt,
+            contactName: contacts.name,
+            contactPhone: contacts.phone,
+            vendedorName: vendedorUser.name,
+            criadorName: criadorUser.name,
+          })
+          .from(pendentes)
+          .leftJoin(contacts, eq(pendentes.contactId, contacts.id))
+          .leftJoin(vendedorUser, eq(pendentes.vendedorId, vendedorUser.id))
+          .leftJoin(criadorUser, eq(pendentes.criadorId, criadorUser.id));
+        if (conditions.length > 0) {
+          query = query.where(and(...conditions)) as typeof query;
+        }
+
+        return await (query as any)
+          .orderBy(desc(pendentes.priorityLevel), asc(pendentes.returnDate))
+          .limit(200);
+      }),
 
     create: protectedProcedure
-      .input(z.object({
-        contactId: z.number(),
-        returnDate: z.string(),
-        notes: z.string().optional(),
-        offerDesired: z.string().optional(),
-        priorityLevel: z.number().int().min(1).max(5).optional(),
-      }))
+      .input(
+        z.object({
+          contactId: z.number(),
+          returnDate: z.string(),
+          historicoChamada: z.string().min(1, "Histórico / notas da chamada obrigatório."),
+          notes: z.string().optional(),
+          offerDesired: z.string().optional(),
+          priorityLevel: z.number().int().min(1).max(5).optional(),
+          name: z.string().optional(),
+          clientNif: z.string().max(32).optional(),
+          operadoraAtual: z.string().max(64).optional(),
+          phone: z.string().optional(),
+          finalizeDialer: z.boolean().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new Error("Database not available");
@@ -1169,21 +1209,40 @@ export const appRouter = router({
 
         await assertContactAccessible(db, input.contactId, user);
 
-        await db.insert(pendentes).values({
-          contactId: input.contactId,
-          vendedorId: user?.id,
-          returnDate: new Date(input.returnDate),
-          notes: input.notes || null,
-          offerDesired: input.offerDesired || null,
-          status: "agendado",
-          priorityLevel: input.priorityLevel ?? 3,
+        if (input.name?.trim() || input.phone?.trim()) {
+          const patch: Record<string, unknown> = {};
+          if (input.name?.trim()) patch.name = input.name.trim();
+          if (input.phone?.trim()) patch.phone = input.phone.replace(/\s+/g, "").trim();
+          await db.update(contacts).set(patch as any).where(eq(contacts.id, input.contactId));
+        }
+
+        const hist = input.historicoChamada.trim();
+        let publicPendingId = "";
+        await db.transaction(async (tx) => {
+          publicPendingId = await generateUniquePublicPendingId(tx);
+          await tx.insert(pendentes).values({
+            contactId: input.contactId,
+            vendedorId: user?.id,
+            criadorId: user?.id,
+            returnDate: new Date(input.returnDate),
+            notes: input.notes?.trim() || null,
+            offerDesired: input.offerDesired?.trim() || null,
+            status: "agendado",
+            priorityLevel: input.priorityLevel ?? 3,
+            publicPendingId,
+            clientNif: input.clientNif?.trim() || null,
+            operadoraAtual: input.operadoraAtual?.trim() || null,
+            historicoChamada: hist,
+          } as any);
+
+          await tx.update(contacts).set({ status: "pendente" }).where(eq(contacts.id, input.contactId));
+
+          if (input.finalizeDialer) {
+            await finalizeDialerSessionInTx(tx, user, input.contactId, "pendente", input.notes?.trim() || hist);
+          }
         });
 
-        await db.update(contacts)
-          .set({ status: "pendente" })
-          .where(eq(contacts.id, input.contactId));
-
-        return { success: true };
+        return { success: true, publicPendingId };
       }),
 
     createWithContact: protectedProcedure
@@ -1191,10 +1250,14 @@ export const appRouter = router({
         z.object({
           phone: z.string().min(1),
           name: z.string().optional(),
+          clientNif: z.string().max(32).optional(),
+          operadoraAtual: z.string().max(64).optional(),
           returnDate: z.string(),
+          historicoChamada: z.string().min(1, "Histórico / notas da chamada obrigatório."),
           notes: z.string().optional(),
           offerDesired: z.string().optional(),
           priorityLevel: z.number().int().min(1).max(5).optional(),
+          finalizeDialer: z.boolean().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -1252,19 +1315,90 @@ export const appRouter = router({
 
         await assertContactAccessible(db, contactId, user);
 
-        await db.insert(pendentes).values({
-          contactId,
-          vendedorId: user?.id,
-          returnDate: new Date(input.returnDate),
-          notes: input.notes || null,
-          offerDesired: input.offerDesired || null,
-          status: "agendado",
-          priorityLevel: input.priorityLevel ?? 3,
+        const hist = input.historicoChamada.trim();
+        let publicPendingId = "";
+        if (input.clientNif?.trim()) {
+          await db
+            .update(contacts)
+            .set({ name: input.name?.trim() || undefined } as any)
+            .where(eq(contacts.id, contactId));
+        }
+
+        await db.transaction(async (tx) => {
+          publicPendingId = await generateUniquePublicPendingId(tx);
+          await tx.insert(pendentes).values({
+            contactId,
+            vendedorId: user?.id,
+            criadorId: user?.id,
+            returnDate: new Date(input.returnDate),
+            notes: input.notes?.trim() || null,
+            offerDesired: input.offerDesired?.trim() || null,
+            status: "agendado",
+            priorityLevel: input.priorityLevel ?? 3,
+            publicPendingId,
+            clientNif: input.clientNif?.trim() || null,
+            operadoraAtual: input.operadoraAtual?.trim() || null,
+            historicoChamada: hist,
+          } as any);
+
+          await tx.update(contacts).set({ status: "pendente" }).where(eq(contacts.id, contactId));
+
+          if (input.finalizeDialer) {
+            await finalizeDialerSessionInTx(tx, user, contactId, "pendente", input.notes?.trim() || hist);
+          }
         });
 
-        await db.update(contacts).set({ status: "pendente" }).where(eq(contacts.id, contactId));
+        return { success: true, contactId, publicPendingId };
+      }),
 
-        return { success: true, contactId };
+    convertToSale: protectedProcedure
+      .input(
+        z.object({
+          pendenteId: z.number().int().positive(),
+          product: z.enum(["telecom", "energia"]).default("telecom"),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        const [p] = await db.select().from(pendentes).where(eq(pendentes.id, input.pendenteId)).limit(1);
+        if (!p) throw new Error("Pendente não encontrado");
+        if ((p as { convertedSaleId?: number | null }).convertedSaleId) {
+          throw new Error("Este pendente já foi convertido em venda.");
+        }
+        await assertContactAccessible(db, p.contactId, user);
+
+        const publicSaleId = await generateUniquePublicSaleId(db);
+        const now = new Date();
+        await db.insert(sales).values({
+          contactId: p.contactId,
+          vendedorId: p.vendedorId,
+          product: input.product,
+          status: "aguarda_instalacao",
+          publicSaleId,
+          offer: p.offerDesired,
+          createdAt: now,
+          closedAt: now,
+        } as any);
+
+        const [created] = await db
+          .select({ id: sales.id })
+          .from(sales)
+          .where(and(eq(sales.contactId, p.contactId), eq(sales.publicSaleId, publicSaleId)))
+          .limit(1);
+        const saleId = created?.id;
+        if (!saleId) throw new Error("Falha ao criar venda");
+
+        await db
+          .update(pendentes)
+          .set({ status: "realizado", convertedSaleId: saleId } as any)
+          .where(eq(pendentes.id, input.pendenteId));
+
+        await db.update(contacts).set({ status: "venda" }).where(eq(contacts.id, p.contactId));
+
+        return { success: true, saleId, publicSaleId };
       }),
 
     update: protectedProcedure
@@ -1273,6 +1407,7 @@ export const appRouter = router({
         returnDate: z.string().optional(),
         notes: z.string().optional().nullable(),
         offerDesired: z.string().optional().nullable(),
+        historicoChamada: z.string().min(1, "Histórico / notas da chamada obrigatório."),
         status: z
           .enum(["agendado", "realizado", "expirado", "cancelado", "nao_fechou"])
           .optional(),
@@ -1300,7 +1435,7 @@ export const appRouter = router({
           throw new Error("Seleccione o motivo de não fechamento.");
         }
 
-        const payload: Record<string, unknown> = {};
+        const payload: Record<string, unknown> = { historicoChamada: input.historicoChamada.trim() };
         if (input.returnDate !== undefined) payload.returnDate = new Date(input.returnDate);
         if (input.notes !== undefined) payload.notes = input.notes;
         if (input.offerDesired !== undefined) payload.offerDesired = input.offerDesired;
@@ -1314,7 +1449,6 @@ export const appRouter = router({
           payload.motivoNaoFechamentoId = input.motivoNaoFechamentoId;
         }
         if (input.priorityLevel !== undefined) payload.priorityLevel = input.priorityLevel;
-        if (Object.keys(payload).length === 0) return { success: true };
 
         await db.update(pendentes).set(payload as any).where(eq(pendentes.id, input.id));
         await db.insert(auditLogs).values({
@@ -2085,6 +2219,36 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       return { entries };
     }),
 
+    getDeployStatus: superAdminProcedure.query(async () => readDeployStatus()),
+
+    startDeploy: superAdminProcedure.mutation(async ({ ctx }) => {
+      const user = ctx.user as { id: number; email?: string | null };
+      return startDeployPm2({ id: user.id, email: user.email });
+    }),
+
+    getDbSyncStatus: superAdminProcedure.query(async () => readDbSyncStatus()),
+
+    startDbSync: superAdminProcedure.mutation(async ({ ctx }) => {
+      const user = ctx.user as { id: number; email?: string | null };
+      return startDbSync({ id: user.id, email: user.email });
+    }),
+
+    getBackupInventory: superAdminProcedure.query(() => listBackupInventory()),
+
+    getBackupSystemStatus: superAdminProcedure.query(async () => readBackupSystemStatus()),
+
+    getBackupDatabaseStatus: superAdminProcedure.query(async () => readBackupDatabaseStatus()),
+
+    startSystemBackup: superAdminProcedure.mutation(async ({ ctx }) => {
+      const user = ctx.user as { id: number; email?: string | null };
+      return startSystemBackup({ id: user.id, email: user.email });
+    }),
+
+    startDatabaseBackup: superAdminProcedure.mutation(async ({ ctx }) => {
+      const user = ctx.user as { id: number; email?: string | null };
+      return startDatabaseBackup({ id: user.id, email: user.email });
+    }),
+
     /** Contagem global de pedidos Gemini e pesquisas Tavily no período actual (env: GEMINI_QUOTA_PERIOD, etc.). */
     getGlobalApiUsage: superAdminProcedure.query(async () => getGlobalApiUsageSnapshot()),
 
@@ -2412,14 +2576,14 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         });
 
         const statusMap: Record<string, string> = {
-          atendeu: "em_contacto",
+          atendeu: "pendente",
           nao_atende: "nao_atende",
           venda: "venda",
           pendente: "pendente",
           sem_interesse: "sem_interesse",
         };
 
-        const newStatus = statusMap[input.outcome] || "em_contacto";
+        const newStatus = statusMap[input.outcome] || "pendente";
         await db.update(contacts).set({
           status: newStatus as any,
           attempts: sql`attempts + 1`,
@@ -2651,7 +2815,6 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       await db.update(contacts).set({
         assignedTo: user?.id,
         lastAssignedAt: new Date(),
-        status: "em_contacto",
       }).where(eq(contacts.id, contact.id));
 
       return contact;
@@ -2773,7 +2936,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         if (user?.crmRole === "ce" && utid != null) {
           conditions.push(
             sql`NOT (
-              ${contacts.status} IN ('novo', 'em_contacto')
+              ${contacts.status} IN ('novo')
               AND ${contacts.addedBy} IS NOT NULL
               AND ${contacts.addedBy} = ${contacts.assignedTo}
               AND ${contacts.addedBy} IN (
@@ -2785,7 +2948,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         if (user?.crmRole === "cej" && utid != null) {
           conditions.push(
             sql`NOT (
-              ${contacts.status} IN ('novo', 'em_contacto')
+              ${contacts.status} IN ('novo')
               AND ${contacts.addedBy} IS NOT NULL
               AND ${contacts.addedBy} = ${contacts.assignedTo}
               AND ${contacts.addedBy} <> ${user.id}
@@ -2873,7 +3036,6 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       await db.update(contacts).set({
         assignedTo: user?.id,
         lastAssignedAt: new Date(),
-        status: "em_contacto",
       }).where(eq(contacts.id, c.id));
 
       await db.update(users).set({
@@ -2885,6 +3047,38 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
 
       return { source: "queue", contact: c };
     }),
+
+    releaseWorkflowCancel: protectedProcedure
+      .input(z.object({ contactId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        if (!canUseDialer(user)) {
+          throw new Error("Discador disponível para vendedores, chefes de equipa e coordenadores.");
+        }
+        const [u] = await db
+          .select({ dialerContactId: users.dialerContactId })
+          .from(users)
+          .where(eq(users.id, user.id))
+          .limit(1);
+        if (Number(u?.dialerContactId) !== input.contactId) {
+          return { success: true as const };
+        }
+        await db
+          .update(contacts)
+          .set({ assignedTo: null, lastAssignedAt: null })
+          .where(eq(contacts.id, input.contactId));
+        await db
+          .update(users)
+          .set({
+            dialerState: "idle",
+            dialerContactId: null,
+            dialerUpdatedAt: new Date(),
+          } as any)
+          .where(eq(users.id, user.id));
+        return { success: true as const };
+      }),
 
     outcome: protectedProcedure
       .input(
@@ -2969,29 +3163,11 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         return rows.map(mapDevice);
       }
 
-      // Coordenador: visão global no tenant. CE / CEJ: só membros da mesma equipa.
+      // Coordenador / CE / CEJ: visibilidade alinhada ao hub Equipa (Fase 1).
+      const { buildEquipaMembersWhere } = await import("./equipaHubScope");
+      const visibility = buildEquipaMembersWhere(user as Record<string, unknown>);
       let q = db.select(selectSupervisionUsers).from(users);
-      const uw = whereUsersForUser(user as any);
-      const parts: SQL[] = [];
-      if (uw) parts.push(uw);
-
-      if (user?.crmRole === "coordenador") {
-        if (parts.length) q = (q as any).where(and(...parts));
-        const rows = await (q as any);
-        return rows.map(mapDevice);
-      }
-
-      const scopeId = await resolveUserTeamScopeId(db, {
-        id: user.id,
-        teamId: user.teamId ?? null,
-        crmRole: user.crmRole,
-      });
-
-      if (scopeId == null) return [];
-
-      parts.push(eq(users.teamId, scopeId));
-      q = (q as any).where(and(...parts));
-
+      if (visibility.length) q = (q as any).where(and(...visibility));
       const rows = await (q as any);
       return rows.map(mapDevice);
     }),
@@ -3151,6 +3327,51 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         }
 
         await db.delete(blacklist).where(eq(blacklist.id, input.id));
+        return { success: true };
+      }),
+
+    updateReason: protectedProcedure
+      .input(
+        z.object({
+          id: z.number(),
+          reason: z.string().max(500).nullable(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+
+        if (!["ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) {
+          throw new Error("Sem permissão para editar motivo na lista negra.");
+        }
+
+        const [row] = await db.select().from(blacklist).where(eq(blacklist.id, input.id)).limit(1);
+        if (!row) throw new Error("Registo não encontrado.");
+
+        const scope = getScopedTenantCoordinatorUserId(user);
+        if (!isSuperAdminUser(user)) {
+          if (scope === null || typeof scope !== "number" || Number(row.tenantId) !== scope) {
+            throw new Error("Sem permissão sobre esta linha.");
+          }
+          if (user.crmRole === "ce") {
+            const ts = await resolveUserTeamScopeId(db, {
+              id: user.id,
+              teamId: user.teamId ?? null,
+              crmRole: user.crmRole,
+            });
+            if (ts == null) throw new Error("Equipa não resolvida.");
+            if (row.teamId != null && Number(row.teamId) !== ts) {
+              throw new Error("Só pode editar entradas da sua equipa.");
+            }
+          }
+        }
+
+        await db
+          .update(blacklist)
+          .set({ reason: input.reason?.trim() || null } as any)
+          .where(eq(blacklist.id, input.id));
+
         return { success: true };
       }),
   }),
@@ -3589,7 +3810,18 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
   // ============ AUDIT (só leitura — nunca UPDATE/DELETE na app; linhas intocáveis) ============
   audit: router({
     list: protectedProcedure
-      .input(z.object({ limit: z.number().default(50) }).optional())
+      .input(
+        z
+          .object({
+            limit: z.number().min(1).max(500).default(100),
+            userId: z.number().int().positive().optional(),
+            action: z.string().max(100).optional(),
+            entity: z.string().max(100).optional(),
+            dateFrom: z.string().optional(),
+            dateTo: z.string().optional(),
+          })
+          .optional(),
+      )
       .query(async ({ ctx, input }) => {
         const user = ctx.user as any;
         if (
@@ -3600,12 +3832,47 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         }
         const db = await getDb();
         if (!db) return [];
-        const rows = await db
+
+        const actor = alias(users, "audit_actor");
+        const parts: SQL[] = [];
+
+        if (!isSuperAdminUser(user)) {
+          const tid =
+            user?.crmRole === "coordenador"
+              ? user.tenantId != null
+                ? Number(user.tenantId)
+                : Number(user.id)
+              : Number(user.tenantId);
+          if (!Number.isNaN(tid)) {
+            parts.push(eq(actor.tenantId, tid));
+          }
+        }
+
+        if (user?.crmRole === "ce" && user.companyId != null) {
+          parts.push(eq(actor.companyId, Number(user.companyId)));
+        }
+
+        if (input?.userId) parts.push(eq(auditLogs.userId, input.userId));
+        if (input?.action?.trim()) parts.push(eq(auditLogs.action, input.action.trim()));
+        if (input?.entity?.trim()) parts.push(eq(auditLogs.entity, input.entity.trim()));
+        if (input?.dateFrom) {
+          const d = new Date(input.dateFrom);
+          if (!Number.isNaN(d.getTime())) parts.push(gte(auditLogs.createdAt, d));
+        }
+        if (input?.dateTo) {
+          const d = new Date(input.dateTo);
+          if (!Number.isNaN(d.getTime())) {
+            d.setHours(23, 59, 59, 999);
+            parts.push(lte(auditLogs.createdAt, d));
+          }
+        }
+
+        let q = db
           .select({
             id: auditLogs.id,
             userId: auditLogs.userId,
-            actorName: users.name,
-            actorEmail: users.email,
+            actorName: actor.name,
+            actorEmail: actor.email,
             action: auditLogs.action,
             entity: auditLogs.entity,
             entityId: auditLogs.entityId,
@@ -3613,11 +3880,15 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
             createdAt: auditLogs.createdAt,
           })
           .from(auditLogs)
-          .leftJoin(users, eq(auditLogs.userId, users.id))
-          .orderBy(desc(auditLogs.createdAt))
-          .limit(input?.limit || 50);
+          .leftJoin(actor, eq(auditLogs.userId, actor.id));
 
-        return rows.map((r) => ({
+        if (parts.length) q = (q as any).where(and(...parts));
+
+        const rows = await (q as any)
+          .orderBy(desc(auditLogs.createdAt))
+          .limit(input?.limit ?? 100);
+
+        return rows.map((r: (typeof rows)[number]) => ({
           id: r.id,
           userId: r.userId,
           actorLabel:
@@ -3710,15 +3981,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         z
           .object({
             status: z
-              .enum([
-                "aguarda_instalacao",
-                "em_aberto",
-                "activo",
-                "e_switch",
-                "cancelado",
-                "pendente",
-                "nao_fechou",
-              ])
+              .enum(["aguarda_instalacao", "em_aberto", "activo", "cancelado"])
               .optional(),
             contactId: z.number().int().positive().optional(),
             createdFrom: z.string().optional(),
@@ -3742,7 +4005,10 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         if (cten) parts.push(cten);
         if (input?.contactId != null) parts.push(eq(sales.contactId, input.contactId));
         if (input?.status) parts.push(eq(sales.status, input.status));
-        else parts.push(sql`${sales.status} <> 'cancelado'`);
+        else
+          parts.push(
+            sql`${sales.status} IN ('aguarda_instalacao','em_aberto','activo')`,
+          );
 
         if (input?.createdFrom?.trim()) {
           const d = new Date(input.createdFrom);
@@ -3801,15 +4067,18 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       }),
 
     create: protectedProcedure
-      .input(z.object({
-        contactId: z.number(),
-        product: z.enum(["telecom", "energia"]),
-        offer: z.string().optional(),
-        value: z.string().optional(),
-        installationDate: z.string().optional(),
-        /** Campos opcionais da ficha de contrato (nenhum obrigatório). */
-        contractDossier: z.record(z.string(), z.string().max(4000)).optional(),
-      }))
+      .input(
+        z.object({
+          contactId: z.number(),
+          product: z.enum(["telecom", "energia"]),
+          offer: z.string().optional(),
+          value: z.string().optional(),
+          installationDate: z.string().optional(),
+          contractDossier: z.record(z.string(), z.string().max(4000)).optional(),
+          finalizeDialer: z.boolean().optional(),
+          dialerNotes: z.string().optional(),
+        }),
+      )
       .mutation(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) throw new Error("Database not available");
@@ -3819,45 +4088,60 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
 
         const dossierJson =
           input.contractDossier && Object.keys(input.contractDossier).length > 0
-            ? mergeSaleContractDossier(null, input.contractDossier as Record<string, string | null | undefined>)
+            ? mergeSaleContractDossier(
+                null,
+                input.contractDossier as Record<string, string | null | undefined>,
+              )
             : null;
 
-        await db.insert(sales).values({
-          contactId: input.contactId,
-          vendedorId: user?.id,
-          product: input.product,
-          offer: input.offer || null,
-          value: input.value || null,
-          installationDate: input.installationDate ? new Date(input.installationDate) : null,
-          status: "aguarda_instalacao",
-          saleContractDossier: dossierJson,
+        const dialerObs = input.dialerNotes?.trim() || null;
+        const now = new Date();
+
+        await db.transaction(async (tx) => {
+          const publicSaleId = await generateUniquePublicSaleId(tx as any);
+          await tx.insert(sales).values({
+            contactId: input.contactId,
+            vendedorId: user?.id,
+            product: input.product,
+            offer: input.offer || null,
+            value: input.value || null,
+            installationDate: input.installationDate ? new Date(input.installationDate) : null,
+            status: "aguarda_instalacao",
+            saleContractDossier: dossierJson,
+            publicSaleId,
+            createdAt: now,
+            closedAt: now,
+          } as any);
+
+          const [created] = await tx
+            .select({ id: sales.id })
+            .from(sales)
+            .where(and(eq(sales.contactId, input.contactId), eq(sales.vendedorId, user?.id as number)))
+            .orderBy(desc(sales.id))
+            .limit(1);
+
+          if (created?.id && input.installationDate && String(input.installationDate).trim()) {
+            await syncSaleInstallationCalendar(tx as any, {
+              saleId: created.id,
+              contactId: input.contactId,
+              vendedorId: user?.id as number,
+              installationDate: new Date(input.installationDate),
+            });
+          }
+
+          await tx
+            .update(contacts)
+            .set({
+              status: "venda",
+              ...(input.product === "telecom" ? { hasTelecom: true } : { hasEnergy: true }),
+            })
+            .where(eq(contacts.id, input.contactId));
+
+          if (input.finalizeDialer) {
+            await finalizeDialerSessionInTx(tx, user, input.contactId, "fechado_venda", dialerObs);
+          }
         });
 
-        const [created] = await db
-          .select({ id: sales.id })
-          .from(sales)
-          .where(and(eq(sales.contactId, input.contactId), eq(sales.vendedorId, user?.id as number)))
-          .orderBy(desc(sales.id))
-          .limit(1);
-
-        if (created?.id && input.installationDate && String(input.installationDate).trim()) {
-          await syncSaleInstallationCalendar(db, {
-            saleId: created.id,
-            contactId: input.contactId,
-            vendedorId: user?.id as number,
-            installationDate: new Date(input.installationDate),
-          });
-        }
-
-        // Update contact status
-        await db.update(contacts)
-          .set({
-            status: "venda",
-            ...(input.product === "telecom" ? { hasTelecom: true } : { hasEnergy: true }),
-          })
-          .where(eq(contacts.id, input.contactId));
-
-        // Log audit
         await db.insert(auditLogs).values({
           userId: user?.id,
           action: "sale_created",
@@ -4002,22 +4286,101 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         return { success: true };
       }),
 
+    updateServices: protectedProcedure
+      .input(
+        z.object({
+          saleId: z.number(),
+          titularTroca: z.boolean().optional(),
+          portabilidadeMovel: z.boolean().optional(),
+          portabilidadeFixa: z.boolean().optional(),
+          desativacaoApoiada: z.boolean().optional(),
+          antigoTitularNome: z.string().max(255).nullable().optional(),
+          antigoTitularNif: z.string().max(32).nullable().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+        const patch: Record<string, unknown> = {};
+        if (input.titularTroca !== undefined) patch.titularTroca = input.titularTroca;
+        if (input.portabilidadeMovel !== undefined) patch.portabilidadeMovel = input.portabilidadeMovel;
+        if (input.portabilidadeFixa !== undefined) patch.portabilidadeFixa = input.portabilidadeFixa;
+        if (input.desativacaoApoiada !== undefined) patch.desativacaoApoiada = input.desativacaoApoiada;
+        if (input.antigoTitularNome !== undefined) patch.antigoTitularNome = input.antigoTitularNome;
+        if (input.antigoTitularNif !== undefined) patch.antigoTitularNif = input.antigoTitularNif;
+        if (Object.keys(patch).length) {
+          await db.update(sales).set(patch as any).where(eq(sales.id, input.saleId));
+        }
+        return { success: true };
+      }),
+
+    updateDocumentacao: protectedProcedure
+      .input(
+        z.object({
+          saleId: z.number(),
+          statusDocumentacao: z.enum(["pendente", "enviado", "assinado", "back_office"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+        await db
+          .update(sales)
+          .set({ statusDocumentacao: input.statusDocumentacao } as any)
+          .where(eq(sales.id, input.saleId));
+        return { success: true };
+      }),
+
+    generateContractPdfs: protectedProcedure
+      .input(z.object({ saleId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [row] = await db
+          .select({ sale: sales, contactName: contacts.name, contactPhone: contacts.phone })
+          .from(sales)
+          .innerJoin(contacts, eq(sales.contactId, contacts.id))
+          .where(eq(sales.id, input.saleId))
+          .limit(1);
+        if (!row) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, row.sale, user);
+        const s = row.sale as Record<string, unknown>;
+        const result = await generateContractPdfZip({
+          publicSaleId: s.publicSaleId as string | null,
+          titularTroca: !!s.titularTroca,
+          portabilidadeMovel: !!s.portabilidadeMovel,
+          portabilidadeFixa: !!s.portabilidadeFixa,
+          desativacaoApoiada: !!s.desativacaoApoiada,
+          antigoTitularNome: s.antigoTitularNome as string | null,
+          antigoTitularNif: s.antigoTitularNif as string | null,
+          saleContractDossier: s.saleContractDossier as string | null,
+          contactName: row.contactName,
+          contactPhone: row.contactPhone,
+        });
+        const ref = (s.publicSaleId as string) || `sale-${input.saleId}`;
+        return {
+          zipBase64: result.zipBase64,
+          filenames: result.filenames,
+          downloadName: `contratos-${ref}.zip`,
+        };
+      }),
+
     /** Exportação CSV (Excel-friendly) do Acompanhamento + ficha de contrato. */
     exportContractDossierCsv: protectedProcedure
       .input(
         z
           .object({
             status: z
-              .enum([
-                "aguarda_instalacao",
-                "em_aberto",
-                "activo",
-                "e_switch",
-                "cancelado",
-                "pendente",
-                "nao_fechou",
-                "__all",
-              ])
+              .enum(["aguarda_instalacao", "em_aberto", "activo", "cancelado", "__all"])
               .optional(),
           })
           .optional(),
@@ -4036,7 +4399,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
 
         const status = input?.status;
         if (status && status !== "__all") parts.push(eq(sales.status, status as any));
-        else parts.push(sql`${sales.status} <> 'cancelado'`);
+        else parts.push(sql`${sales.status} IN ('aguarda_instalacao','em_aberto','activo')`);
 
         const saleVendedor = alias(users, "sale_vendedor_csv");
         const rows = await db

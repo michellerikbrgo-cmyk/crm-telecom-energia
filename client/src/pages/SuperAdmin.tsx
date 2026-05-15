@@ -10,6 +10,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { trpc } from "@/lib/trpc";
 import { useEffect, useMemo, useState } from "react";
 import { SuperAdminPaymentsPanel } from "@/pages/super-admin/SuperAdminPaymentsPanel";
+import { DeployPm2Panel } from "@/pages/super-admin/DeployPm2Panel";
 import { toast } from "sonner";
 import {
   BarChart3,
@@ -440,6 +441,7 @@ export default function SuperAdmin() {
           </TabsContent>
 
           <TabsContent value="logs" className="mt-6 space-y-6 outline-none">
+        {isSuperOnly ? <DeployPm2Panel /> : null}
         <Card className="shadow-sm border border-border border-l-[4px] border-l-primary">
           <CardHeader className="pb-2">
             <CardTitle className="text-lg flex items-center gap-2">

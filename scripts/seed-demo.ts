@@ -131,7 +131,7 @@ async function main() {
         name: "Carla Mendes",
         email: "carla.mendes@email.pt",
         origin: "Stand Colombo (demo)",
-        status: "em_contacto" as const,
+        status: "pendente" as const,
         notes: "Interessada em fibra 500 Mbps + TV; comparar com NOS.",
       },
       {

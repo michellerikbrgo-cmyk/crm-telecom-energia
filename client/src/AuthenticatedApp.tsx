@@ -9,7 +9,6 @@ import { RoleProtectedRoute } from "@/components/RoleProtectedRoute";
 const Home = lazy(() => import("@/pages/Home"));
 const Contactos = lazy(() => import("@/pages/Contactos"));
 const Pendentes = lazy(() => import("@/pages/Pendentes"));
-const Contratos = lazy(() => import("@/pages/Contratos"));
 const Calculadora = lazy(() => import("@/pages/Calculadora"));
 const IAObjecoes = lazy(() => import("@/pages/IAObjecoes"));
 const Campanhas = lazy(() => import("@/pages/Campanhas"));
@@ -22,7 +21,6 @@ const BaseDados = lazy(() => import("@/pages/BaseDados"));
 const GestaoUtilizadores = lazy(() => import("@/pages/GestaoUtilizadores"));
 const SuperAdmin = lazy(() => import("@/pages/SuperAdmin"));
 const Discador = lazy(() => import("@/pages/Discador"));
-const Supervisao = lazy(() => import("@/pages/Supervisao"));
 const ListaNegra = lazy(() => import("@/pages/ListaNegra"));
 const Acompanhamento = lazy(() => import("@/pages/Acompanhamento"));
 const Beta = lazy(() => import("@/pages/Beta"));
@@ -43,12 +41,11 @@ export default function AuthenticatedApp() {
             <Route path="/beta" component={Beta} />
             <Route path="/acompanhamento" component={Acompanhamento} />
             <Route path="/contactos">
-              <RoleProtectedRoute allow={["cej", "ce", "coordenador"]}>
+              <RoleProtectedRoute allow={["ce", "coordenador"]}>
                 <Contactos />
               </RoleProtectedRoute>
             </Route>
             <Route path="/pendentes" component={Pendentes} />
-            <Route path="/contratos" component={Contratos} />
             <Route path="/calculadora" component={Calculadora} />
             <Route path="/planos" component={PlanosEmpresas} />
             <Route path="/ia-objecoes" component={IAObjecoes} />
@@ -64,9 +61,9 @@ export default function AuthenticatedApp() {
             <Route path="/auditoria" component={Auditoria} />
             <Route path="/base-dados" component={BaseDados} />
             <Route path="/utilizadores" component={GestaoUtilizadores} />
+            <Route path="/supervisao" component={GestaoUtilizadores} />
             <Route path="/super-admin" component={SuperAdmin} />
             <Route path="/discador" component={Discador} />
-            <Route path="/supervisao" component={Supervisao} />
             <Route path="/lista-negra">
               <RoleProtectedRoute allow={["ce", "coordenador"]}>
                 <ListaNegra />

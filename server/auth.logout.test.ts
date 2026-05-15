@@ -53,10 +53,6 @@ describe("auth.logout", () => {
     expect(result).toEqual({ success: true });
     expect(clearedCookies).toHaveLength(1);
     expect(clearedCookies[0]?.name).toBe(COOKIE_NAME);
-    const expectedBase = getSessionCookieOptions(ctx.req as Request);
-    expect(clearedCookies[0]?.options).toEqual({
-      ...expectedBase,
-      maxAge: -1,
-    });
+    expect(clearedCookies[0]?.options).toEqual(getSessionCookieOptions(ctx.req as Request));
   });
 });

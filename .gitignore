@@ -49,6 +49,7 @@ local/**
 
 # Uploads locais (defina LOCAL_UPLOAD_ROOT para esta pasta ou outra)
 data/uploads/
+data/backups/
 # Histórico de deploys gerado por scripts/record-deploy.mjs (opcional não versionar)
 data/release-log.json
 

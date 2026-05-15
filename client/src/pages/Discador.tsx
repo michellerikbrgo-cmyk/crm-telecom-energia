@@ -4,7 +4,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -14,24 +14,23 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { PhoneCall, RefreshCw, Ban, AlertTriangle, Calendar, ClipboardList, FileText, Sparkles } from "lucide-react";
+import { PriorityStars } from "@/components/PriorityStars";
+import { PhoneCall, Ban, AlertTriangle, Calendar, ClipboardList, Sparkles } from "lucide-react";
 import { trpc } from "@/lib/trpc";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Link } from "wouter";
 
 const FEEDBACK_DESTINATIONS = [
-  { value: "none", label: "Sem qualificação" },
+  { value: "nao_atende", label: "Não atende" },
+  { value: "pendente", label: "Pendente" },
   { value: "no_interest", label: "Sem interesse" },
+  { value: "no_fiber_coverage", label: "Sem cobertura" },
   { value: "vodafone_client", label: "Cliente Vodafone" },
-  { value: "other", label: "Outros" },
-  { value: "no_fiber_coverage", label: "Cliente não tem cobertura de fibra" },
-  { value: "fidelizado", label: "Fidelizado" },
-  { value: "pendente", label: "Pendente (venda em curso)" },
+  { value: "fechado_venda", label: "Venda" },
+  { value: "lista_negra", label: "Blacklist" },
 ] as const;
-
-const OPERADORAS = ["NOS", "MEO", "NOWO", "DIGI", "WOO", "AMIGO", "UZO"] as const;
 
 type Destination = (typeof FEEDBACK_DESTINATIONS)[number]["value"];
 
@@ -48,25 +47,48 @@ export default function Discador() {
     retry: false,
   });
 
+  const utils = trpc.useUtils();
+
   const feedbackMutation = trpc.feedback.submitFeedback.useMutation({
     onSuccess: async () => {
       toast.success("Feedback guardado. A carregar o próximo contacto…");
       setStep("idle");
       setNotes("");
-      setDestination("none");
-      setObservacoes("");
-      setFidelDate("");
-      setOperadora("");
-      setPendenteReturn("");
-      setPendentePriority(3);
-      setTitularTroca(false);
-      setAntigoNome("");
-      setAntigoNif("");
-      setPreAgendamento("");
+      setDestination("pendente");
       await Promise.all([nextQuery.refetch(), statsQuery.refetch()]);
     },
     onError: (e: { message?: string }) => toast.error(e.message),
   });
+
+  const createPendenteMutation = trpc.pendentes.create.useMutation({
+    onSuccess: async () => {
+      toast.success("Pendente criado.");
+      pendCloseOkRef.current = true;
+      setPendModalOpen(false);
+      setStep("idle");
+      setNotes("");
+      setDestination("pendente");
+      await Promise.all([nextQuery.refetch(), statsQuery.refetch(), utils.pendentes.list.invalidate()]);
+    },
+    onError: (e: { message?: string }) => toast.error(e.message),
+  });
+
+  const createSaleMutation = trpc.sales.create.useMutation({
+    onSuccess: async () => {
+      toast.success("Venda registada.");
+      saleCloseOkRef.current = true;
+      setSaleModalOpen(false);
+      setStep("idle");
+      setNotes("");
+      setDestination("pendente");
+      await Promise.all([nextQuery.refetch(), statsQuery.refetch(), utils.sales.pipeline.invalidate()]);
+    },
+    onError: (e: { message?: string }) => toast.error(e.message),
+  });
+
+  const releaseCancelMutation = trpc.dialer.releaseWorkflowCancel.useMutation();
+  const pendCloseOkRef = useRef(false);
+  const saleCloseOkRef = useRef(false);
 
   const outcomeMutation = trpc.dialer.outcome.useMutation({
     onSuccess: async () => {
@@ -95,33 +117,49 @@ export default function Discador() {
 
   const [step, setStep] = useState<"idle" | "after_call">("idle");
   const [notes, setNotes] = useState("");
-  const [destination, setDestination] = useState<Destination>("none");
-  const [observacoes, setObservacoes] = useState("");
-  const [fidelDate, setFidelDate] = useState("");
-  const [operadora, setOperadora] = useState<(typeof OPERADORAS)[number] | "">("");
-  const [pendenteReturn, setPendenteReturn] = useState("");
-  const [pendentePriority, setPendentePriority] = useState(3);
-  const [titularTroca, setTitularTroca] = useState(false);
-  const [antigoNome, setAntigoNome] = useState("");
-  const [antigoNif, setAntigoNif] = useState("");
-  const [preAgendamento, setPreAgendamento] = useState("");
+  const [destination, setDestination] = useState<Destination>("pendente");
   const [blacklistOpen, setBlacklistOpen] = useState(false);
   const [blacklistReason, setBlacklistReason] = useState("");
+
+  const [pendModalOpen, setPendModalOpen] = useState(false);
+  const [pendForm, setPendForm] = useState({
+    historicoChamada: "",
+    returnDate: "",
+    priorityLevel: 3,
+    notes: "",
+    offerDesired: "",
+  });
+
+  const [saleModalOpen, setSaleModalOpen] = useState(false);
+  const [saleForm, setSaleForm] = useState({
+    product: "telecom" as "telecom" | "energia",
+    offer: "",
+    value: "",
+    installationDate: "",
+  });
 
   useEffect(() => {
     if (!contact?.id) return;
     setNotes("");
-    setDestination("none");
-    setObservacoes("");
-    setFidelDate("");
-    setOperadora("");
-    setPendenteReturn("");
-    setPendentePriority(3);
-    setTitularTroca(false);
-    setAntigoNome("");
-    setAntigoNif("");
-    setPreAgendamento("");
+    setDestination("pendente");
     setStep(canSubmitDialerFeedback ? "after_call" : "idle");
+    setPendModalOpen(false);
+    setSaleModalOpen(false);
+    pendCloseOkRef.current = false;
+    saleCloseOkRef.current = false;
+    setPendForm({
+      historicoChamada: "",
+      returnDate: "",
+      priorityLevel: 3,
+      notes: "",
+      offerDesired: "",
+    });
+    setSaleForm({
+      product: "telecom",
+      offer: "",
+      value: "",
+      installationDate: "",
+    });
   }, [contact?.id, canSubmitDialerFeedback]);
 
   useEffect(() => {
@@ -142,52 +180,87 @@ export default function Discador() {
 
   const canSubmitFeedback = !!contact;
 
+  const onPendModalOpenChange = (open: boolean) => {
+    if (open) pendCloseOkRef.current = false;
+    if (!open && contact?.id && !pendCloseOkRef.current) {
+      void releaseCancelMutation.mutate({ contactId: contact.id });
+    }
+    if (!open) pendCloseOkRef.current = false;
+    setPendModalOpen(open);
+  };
+
+  const onSaleModalOpenChange = (open: boolean) => {
+    if (open) saleCloseOkRef.current = false;
+    if (!open && contact?.id && !saleCloseOkRef.current) {
+      void releaseCancelMutation.mutate({ contactId: contact.id });
+    }
+    if (!open) saleCloseOkRef.current = false;
+    setSaleModalOpen(open);
+  };
+
   const submitFeedback = () => {
     if (!contact) return;
-    if (!fidelDate.trim()) {
-      toast.error("A data de fidelização é obrigatória.");
+    if (destination === "pendente") {
+      pendCloseOkRef.current = false;
+      setPendForm((f) => ({
+        ...f,
+        historicoChamada: notes.trim() || "",
+        notes: f.notes,
+      }));
+      setPendModalOpen(true);
       return;
     }
-    if (destination === "pendente" && !pendenteReturn.trim()) {
-      toast.error("Defina a data de retorno para o pendente.");
+    if (destination === "fechado_venda") {
+      saleCloseOkRef.current = false;
+      setSaleModalOpen(true);
       return;
     }
-    if (titularTroca && (!antigoNome.trim() || !antigoNif.trim())) {
-      toast.error("Com troca de titularidade, preencha nome e NIF do antigo titular.");
-      return;
-    }
-    const detail: Record<string, string> = {
-      produto: "telecom",
-      nome_cliente: String(contact.name || "").trim(),
-      contacto_tel: String(contact.phone || "").trim(),
-    };
     feedbackMutation.mutate({
       contactId: contact.id,
       destination,
-      observacoes: observacoes.trim() || notes.trim() || undefined,
-      fidelEndDate: fidelDate,
-      operadora: destination === "fidelizado" ? (operadora || undefined) : undefined,
-      pendenteReturnDate: destination === "pendente" ? pendenteReturn : undefined,
-      pendentePriorityLevel: destination === "pendente" ? pendentePriority : undefined,
-      pendenteSaleDetail: destination === "pendente" ? detail : undefined,
-      titularTroca: titularTroca || undefined,
-      antigoTitularNome: titularTroca ? antigoNome.trim() : undefined,
-      antigoTitularNif: titularTroca ? antigoNif.trim() : undefined,
-      preAgendamentoAt: preAgendamento.trim() || undefined,
+      observacoes: notes.trim() || undefined,
+    });
+  };
+
+  const savePendenteFromModal = () => {
+    if (!contact) return;
+    if (!pendForm.returnDate.trim()) {
+      toast.error("Indique a data de retorno.");
+      return;
+    }
+    if (!pendForm.historicoChamada.trim()) {
+      toast.error("O histórico / notas da chamada é obrigatório.");
+      return;
+    }
+    createPendenteMutation.mutate({
+      contactId: contact.id,
+      returnDate: pendForm.returnDate,
+      historicoChamada: pendForm.historicoChamada.trim(),
+      notes: pendForm.notes.trim() || undefined,
+      offerDesired: pendForm.offerDesired.trim() || undefined,
+      priorityLevel: pendForm.priorityLevel,
+      finalizeDialer: true,
+    });
+  };
+
+  const saveSaleFromModal = () => {
+    if (!contact) return;
+    createSaleMutation.mutate({
+      contactId: contact.id,
+      product: saleForm.product,
+      offer: saleForm.offer.trim() || undefined,
+      value: saleForm.value.trim() || undefined,
+      installationDate: saleForm.installationDate.trim() || undefined,
+      finalizeDialer: true,
+      dialerNotes: notes.trim() || undefined,
     });
   };
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Discador</h1>
-          <p className="text-muted-foreground">Um contacto de cada vez</p>
-        </div>
-        <Button variant="outline" className="gap-2" onClick={() => nextQuery.refetch()} disabled={nextQuery.isFetching}>
-          <RefreshCw className="h-4 w-4" />
-          Atualizar
-        </Button>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Discador</h1>
+        <p className="text-muted-foreground">Um contacto de cada vez</p>
       </div>
 
       {queueLow ? (
@@ -217,7 +290,8 @@ export default function Discador() {
           <CardContent className="py-12 text-center text-muted-foreground space-y-2">
             <p>Sem contactos disponíveis na fila.</p>
             <p className="text-xs max-w-md mx-auto">
-              A fila inclui contactos novos, com exclusões por feedback (90 dias), fidelização activa, Vodafone, etc.
+              A fila inclui contactos novos, recontactos «não atende» e reaberturas após exclusão temporária (ex.: sem
+              interesse).
             </p>
             {typeof queueCount === "number" ? (
               <p className="text-xs">Elegíveis agora: {queueCount}</p>
@@ -227,75 +301,58 @@ export default function Discador() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-3">
           <Card className="border-0 shadow-sm lg:col-span-1">
-            <CardHeader>
+            <CardHeader className="pb-2">
               <CardTitle className="text-lg">Contacto ativo</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-3 pt-0">
               {isPendente ? (
-                <div className="rounded-md border p-3 text-sm">
-                  <div className="font-medium">Pendente para ligar agora</div>
-                  <div className="text-muted-foreground">Este contacto saltou a fila normal.</div>
+                <div className="rounded-md border px-3 py-2 text-sm">
+                  <div className="font-medium">Pendente prioritário</div>
+                  <div className="text-xs text-muted-foreground">Fora da fila normal.</div>
                 </div>
               ) : null}
 
-              <div className="space-y-1">
+              <div>
                 <div className="text-xs text-muted-foreground">Telefone</div>
                 <div className="text-xl font-semibold">{contact.phone}</div>
               </div>
-              <div className="space-y-1">
+              <div>
                 <div className="text-xs text-muted-foreground">Nome</div>
                 <div className="font-medium">{contact.name || "—"}</div>
               </div>
 
-              <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
-                <Label className="text-xs font-medium">Data de fidelização (obrigatória)</Label>
-                <Input type="date" value={fidelDate} onChange={(e) => setFidelDate(e.target.value)} />
-                <p className="text-[11px] text-muted-foreground leading-snug">
-                  Preencha antes de ligar e ao submeter o feedback — fica registada no contacto.
-                </p>
-              </div>
-
-              <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
-                <div className="text-xs font-medium text-muted-foreground">Continuar noutras áreas</div>
-                <div className="grid grid-cols-2 gap-2">
-                  <Button variant="outline" size="sm" className="h-auto min-h-10 py-2 gap-1.5 text-xs justify-start px-2" asChild>
-                    <Link href={`/calendario?contactId=${contact.id}`}>
-                      <Calendar className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                      Calendário
-                    </Link>
-                  </Button>
-                  <Button variant="outline" size="sm" className="h-auto min-h-10 py-2 gap-1.5 text-xs justify-start px-2" asChild>
-                    <Link href={`/acompanhamento?contactId=${contact.id}`}>
-                      <ClipboardList className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                      Acompanhamento
-                    </Link>
-                  </Button>
-                  <Button variant="outline" size="sm" className="h-auto min-h-10 py-2 gap-1.5 text-xs justify-start px-2" asChild>
-                    <Link href={`/contratos?contactId=${contact.id}`}>
-                      <FileText className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                      Contratos
-                    </Link>
-                  </Button>
-                  <Button variant="outline" size="sm" className="h-auto min-h-10 py-2 gap-1.5 text-xs justify-start px-2" asChild>
-                    <Link href="/ia-objecoes?tab=mercado">
-                      <Sparkles className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                      IA & mercado
-                    </Link>
-                  </Button>
-                </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" className="gap-1.5" asChild>
+                  <Link href={`/calendario?contactId=${contact.id}`}>
+                    <Calendar className="h-3.5 w-3.5" />
+                    Calendário
+                  </Link>
+                </Button>
+                <Button variant="outline" size="sm" className="gap-1.5" asChild>
+                  <Link href={`/acompanhamento?contactId=${contact.id}`}>
+                    <ClipboardList className="h-3.5 w-3.5" />
+                    Acompanhamento
+                  </Link>
+                </Button>
+                <Button variant="outline" size="sm" className="gap-1.5" asChild>
+                  <Link href="/ia-objecoes?tab=mercado">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    IA
+                  </Link>
+                </Button>
               </div>
 
               {telHref ? (
-                <Button asChild className="w-full gap-2" disabled={!fidelDate.trim()}>
+                <Button asChild className="w-full gap-2">
                   <a href={telHref}>
                     <PhoneCall className="h-4 w-4" />
-                    Ligar (externo)
+                    Ligar
                   </a>
                 </Button>
               ) : (
                 <Button type="button" className="w-full gap-2" disabled>
                   <PhoneCall className="h-4 w-4" />
-                  Ligar (externo)
+                  Ligar
                 </Button>
               )}
 
@@ -304,17 +361,15 @@ export default function Discador() {
                   <Button
                     type="button"
                     variant="outline"
+                    size="sm"
                     onClick={() => setStep((s) => (s === "after_call" ? "idle" : "after_call"))}
                   >
-                    {step === "after_call" ? "Ocultar feedback" : "Mostrar feedback"}
+                    {step === "after_call" ? "Ocultar feedback" : "Feedback"}
                   </Button>
-                ) : (
-                  <Button variant="default" disabled title="Sem acesso ao discador nesta conta.">
-                    Atendeu
-                  </Button>
-                )}
+                ) : null}
                 <Button
                   variant="secondary"
+                  size="sm"
                   onClick={() =>
                     outcomeMutation.mutate({
                       contactId: contact.id,
@@ -331,21 +386,21 @@ export default function Discador() {
               <Button
                 type="button"
                 variant="outline"
-                className="w-full gap-2 border-destructive/40 text-destructive hover:bg-destructive/10"
+                size="sm"
+                className="w-full gap-2 border-destructive/40 text-destructive"
                 onClick={() => setBlacklistOpen(true)}
                 disabled={blacklistMutation.isPending || !contact.phone}
               >
                 <Ban className="h-4 w-4" />
-                Lista negra (não voltar a ligar)
+                Lista negra rápida
               </Button>
 
               <AlertDialog open={blacklistOpen} onOpenChange={setBlacklistOpen}>
                 <AlertDialogContent>
                   <AlertDialogHeader>
-                    <AlertDialogTitle>Adicionar à lista negra?</AlertDialogTitle>
+                    <AlertDialogTitle>Lista negra</AlertDialogTitle>
                     <AlertDialogDescription>
-                      Este número deixa de ser contactado pelo CRM. Confirme apenas se o cliente pediu para não ser
-                      chamado.
+                      O número deixa de ser contactado. Confirme se o cliente pediu para não voltar a ser chamado.
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <div className="space-y-2 py-2">
@@ -353,8 +408,7 @@ export default function Discador() {
                     <Textarea
                       value={blacklistReason}
                       onChange={(e) => setBlacklistReason(e.target.value)}
-                      placeholder="Ex.: pediu não ser contactado"
-                      rows={3}
+                      rows={2}
                     />
                   </div>
                   <AlertDialogFooter>
@@ -371,7 +425,7 @@ export default function Discador() {
                         });
                       }}
                     >
-                      {blacklistMutation.isPending ? "A confirmar…" : "Confirmar lista negra"}
+                      {blacklistMutation.isPending ? "…" : "Confirmar"}
                     </Button>
                   </AlertDialogFooter>
                 </AlertDialogContent>
@@ -380,13 +434,14 @@ export default function Discador() {
           </Card>
 
           <Card className="border-0 shadow-sm lg:col-span-2">
-            <CardHeader>
-              <CardTitle className="text-lg">Feedback & Qualificação</CardTitle>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-lg">Feedback</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label>Notas da chamada</Label>
+            <CardContent className="space-y-3 pt-0">
+              <div className="space-y-1">
+                <Label className="text-xs">Notas</Label>
                 <Textarea
+                  className="min-h-[72px] resize-y"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   placeholder="Resumo da chamada…"
@@ -395,10 +450,10 @@ export default function Discador() {
 
               {step === "after_call" && canSubmitDialerFeedback ? (
                 <>
-                  <div className="space-y-2">
-                    <Label>Destino</Label>
+                  <div className="space-y-1">
+                    <Label className="text-xs">Resultado</Label>
                     <Select value={destination} onValueChange={(v) => setDestination(v as Destination)}>
-                      <SelectTrigger>
+                      <SelectTrigger className="h-9">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -411,148 +466,186 @@ export default function Discador() {
                     </Select>
                   </div>
 
-                  {destination === "fidelizado" ? (
-                    <div className="grid gap-4 sm:grid-cols-2">
-                      <div className="space-y-2 sm:col-span-2 text-xs text-muted-foreground rounded-md border p-2">
-                        A data de fidelização foi preenchida na coluna do contacto (obrigatória antes da chamada).
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Operadora actual</Label>
-                        <Select value={operadora || undefined} onValueChange={(v) => setOperadora(v as (typeof OPERADORAS)[number])}>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Operadora…" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {OPERADORAS.map((o) => (
-                              <SelectItem key={o} value={o}>
-                                {o}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2 sm:col-span-2">
-                        <Label>Observações</Label>
-                        <Textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} rows={3} />
-                      </div>
-                    </div>
+                  {destination === "lista_negra" ? (
+                    <p className="text-xs text-muted-foreground">
+                      O motivo pode ir nas notas. Equivale a adicionar o número à lista negra.
+                    </p>
                   ) : null}
 
                   {destination === "pendente" ? (
-                    <div className="grid gap-4 sm:grid-cols-2 rounded-lg border p-3">
-                      <div className="space-y-2 sm:col-span-2">
-                        <Label>Data de retorno *</Label>
-                        <Input
-                          type="datetime-local"
-                          value={pendenteReturn}
-                          onChange={(e) => setPendenteReturn(e.target.value)}
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>Prioridade (1–5)</Label>
-                        <Select
-                          value={String(pendentePriority)}
-                          onValueChange={(v) => setPendentePriority(Number(v))}
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {[1, 2, 3, 4, 5].map((n) => (
-                              <SelectItem key={n} value={String(n)}>
-                                {n} {n === 5 ? "(máx.)" : ""}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2 sm:col-span-2">
-                        <Label>Pré-agendamento (opcional)</Label>
-                        <Input
-                          type="datetime-local"
-                          value={preAgendamento}
-                          onChange={(e) => setPreAgendamento(e.target.value)}
-                        />
-                      </div>
-                    </div>
+                    <p className="text-xs text-muted-foreground rounded-md border border-dashed px-3 py-2">
+                      Ao submeter, abrimos o formulário de <strong>novo pendente</strong> com este contacto para
+                      preencher retorno, prioridade e histórico.
+                    </p>
                   ) : null}
 
-                  <div className="flex items-start gap-3 rounded-lg border p-3">
-                    <Checkbox
-                      id="titular-troca"
-                      checked={titularTroca}
-                      onCheckedChange={(c) => setTitularTroca(!!c)}
-                    />
-                    <div className="space-y-1">
-                      <Label htmlFor="titular-troca" className="cursor-pointer font-medium leading-snug">
-                        Contrato no operador actual em nome de outra pessoa?
-                      </Label>
-                      <p className="text-xs text-muted-foreground">
-                        Se activo, preencha os dados do antigo titular abaixo.
-                      </p>
-                    </div>
-                  </div>
-                  {titularTroca ? (
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      <div className="space-y-2">
-                        <Label>Nome do antigo titular *</Label>
-                        <Input value={antigoNome} onChange={(e) => setAntigoNome(e.target.value)} />
-                      </div>
-                      <div className="space-y-2">
-                        <Label>NIF do antigo titular *</Label>
-                        <Input value={antigoNif} onChange={(e) => setAntigoNif(e.target.value)} />
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {destination === "other" ? (
-                    <div className="space-y-2">
-                      <Label>Observações</Label>
-                      <Textarea
-                        value={observacoes}
-                        onChange={(e) => setObservacoes(e.target.value)}
-                        placeholder="Descreva o motivo, se quiser"
-                        rows={4}
-                      />
-                    </div>
-                  ) : null}
-
-                  {(destination === "no_interest" ||
-                    destination === "vodafone_client" ||
-                    destination === "no_fiber_coverage") &&
-                  destination ? (
-                    <div className="space-y-2">
-                      <Label>Observações</Label>
-                      <Textarea value={observacoes} onChange={(e) => setObservacoes(e.target.value)} rows={3} />
-                    </div>
+                  {destination === "fechado_venda" ? (
+                    <p className="text-xs text-muted-foreground rounded-md border border-dashed px-3 py-2">
+                      Ao submeter, abrimos a <strong>ficha de venda</strong> (produto, oferta e instalação).
+                    </p>
                   ) : null}
 
                   <Button
                     className="w-full"
-                    disabled={!canSubmitFeedback || feedbackMutation.isPending || !fidelDate.trim()}
+                    size="lg"
+                    disabled={
+                      !canSubmitFeedback ||
+                      feedbackMutation.isPending ||
+                      createPendenteMutation.isPending ||
+                      createSaleMutation.isPending
+                    }
                     onClick={() => submitFeedback()}
                   >
-                    {feedbackMutation.isPending ? "A guardar…" : "Submeter e ir ao próximo"}
+                    {feedbackMutation.isPending || createPendenteMutation.isPending || createSaleMutation.isPending
+                      ? "A processar…"
+                      : "Submeter e próximo"}
                   </Button>
                 </>
               ) : (
-                <div className="text-sm text-muted-foreground">
-                  {canSubmitDialerFeedback ? (
-                    <p>
-                      Clica em <strong className="text-foreground">Mostrar feedback</strong> na coluna do contacto se
-                      tiveres ocultado o formulário.
-                    </p>
-                  ) : (
-                    <p>
-                      Sem permissão para qualificar nesta vista. Usa «Não atendeu» ou lista negra, se aplicável.
-                    </p>
-                  )}
-                </div>
+                <p className="text-sm text-muted-foreground">
+                  {canSubmitDialerFeedback
+                    ? "Use «Feedback» para qualificar ou o atalho «Não atendeu»."
+                    : "Sem permissão para qualificar — use «Não atendeu» ou lista negra."}
+                </p>
               )}
             </CardContent>
           </Card>
         </div>
       )}
+
+      <Dialog open={pendModalOpen} onOpenChange={onPendModalOpenChange}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Novo pendente</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="rounded-md bg-muted/40 px-3 py-2 text-xs">
+              <div>
+                <span className="text-muted-foreground">Tel.</span>{" "}
+                <span className="font-mono font-medium">{contact?.phone || "—"}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Nome</span> {contact?.name || "—"}
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label>Histórico / notas da chamada *</Label>
+              <Textarea
+                value={pendForm.historicoChamada}
+                onChange={(e) => setPendForm((f) => ({ ...f, historicoChamada: e.target.value }))}
+                className="min-h-[88px]"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Data de retorno *</Label>
+              <Input
+                type="datetime-local"
+                value={pendForm.returnDate}
+                onChange={(e) => setPendForm((f) => ({ ...f, returnDate: e.target.value }))}
+                className="h-9"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Prioridade</Label>
+              <PriorityStars
+                value={pendForm.priorityLevel}
+                onChange={(n) => setPendForm((f) => ({ ...f, priorityLevel: n }))}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Notas internas (opcional)</Label>
+              <Textarea
+                className="min-h-[56px]"
+                value={pendForm.notes}
+                onChange={(e) => setPendForm((f) => ({ ...f, notes: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Oferta desejada (opcional)</Label>
+              <Input
+                value={pendForm.offerDesired}
+                onChange={(e) => setPendForm((f) => ({ ...f, offerDesired: e.target.value }))}
+                className="h-9"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => onPendModalOpenChange(false)}>
+              Cancelar
+            </Button>
+            <Button type="button" onClick={savePendenteFromModal} disabled={createPendenteMutation.isPending}>
+              {createPendenteMutation.isPending ? "A guardar…" : "Guardar pendente"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={saleModalOpen} onOpenChange={onSaleModalOpenChange}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Nova venda</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <div className="rounded-md bg-muted/40 px-3 py-2 text-xs">
+              <div>
+                <span className="text-muted-foreground">Tel.</span>{" "}
+                <span className="font-mono font-medium">{contact?.phone || "—"}</span>
+              </div>
+              <div>
+                <span className="text-muted-foreground">Nome</span> {contact?.name || "—"}
+              </div>
+            </div>
+            <div className="space-y-1">
+              <Label>Produto</Label>
+              <Select
+                value={saleForm.product}
+                onValueChange={(v) => setSaleForm((f) => ({ ...f, product: v as "telecom" | "energia" }))}
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="telecom">Telecom</SelectItem>
+                  <SelectItem value="energia">Energia</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Oferta (opcional)</Label>
+              <Input
+                value={saleForm.offer}
+                onChange={(e) => setSaleForm((f) => ({ ...f, offer: e.target.value }))}
+                className="h-9"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Valor (opcional)</Label>
+              <Input
+                value={saleForm.value}
+                onChange={(e) => setSaleForm((f) => ({ ...f, value: e.target.value }))}
+                className="h-9"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Data de instalação (opcional)</Label>
+              <Input
+                type="datetime-local"
+                value={saleForm.installationDate}
+                onChange={(e) => setSaleForm((f) => ({ ...f, installationDate: e.target.value }))}
+                className="h-9"
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button type="button" variant="outline" onClick={() => onSaleModalOpenChange(false)}>
+              Cancelar
+            </Button>
+            <Button type="button" onClick={saveSaleFromModal} disabled={createSaleMutation.isPending}>
+              {createSaleMutation.isPending ? "A guardar…" : "Guardar venda"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

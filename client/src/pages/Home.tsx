@@ -265,7 +265,7 @@ export default function Home() {
                 onClick={async () => {
                   if (!["vendedor", "cej", "ce"].includes(crmRole)) {
                     toast.info("Abra o Discador ou Supervisão conforme o seu perfil.");
-                    setLocation(seesSupervision ? "/supervisao" : "/contactos");
+                    setLocation(seesSupervision ? "/equipa" : "/contactos");
                     return;
                   }
                   try {

@@ -1,9 +1,7 @@
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Select,
@@ -13,23 +11,29 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { trpc } from "@/lib/trpc";
 import {
   SALE_CONTRACT_DOSSIER_FIELDS,
   SALE_CONTRACT_DOSSIER_SECTION_LABELS,
-  dossierFilledCount,
   parseSaleContractDossier,
   type SaleContractDossierFieldDef,
   type SaleContractDossierSection,
 } from "@shared/saleContractDossier";
-import { ClipboardList, FileSpreadsheet } from "lucide-react";
+import {
+  DOC_STATUS_OPTIONS,
+  FIXED_TECH_KEYS,
+  MOBILE_TECH_KEYS,
+} from "@shared/saleServices";
+import { Checkbox } from "@/components/ui/checkbox";
+import { ClipboardList, FileDown, FileSpreadsheet, Printer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useSearch } from "wouter";
@@ -37,15 +41,27 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/_core/hooks/useAuth";
 
 const STATUS_OPTIONS = [
-  { value: "__all", label: "Todas (excepto canceladas)" },
-  { value: "aguarda_instalacao", label: "Aguarda instalação" },
+  { value: "__all", label: "Funil activo (aguarda / aberto / activo)" },
+  { value: "aguarda_instalacao", label: "Aguardando instalação" },
   { value: "em_aberto", label: "Em aberto / problema técnico" },
   { value: "activo", label: "Activo" },
-  { value: "e_switch", label: "e-switch (energia)" },
-  { value: "pendente", label: "Pendente" },
-  { value: "nao_fechou", label: "Não fechou" },
   { value: "cancelado", label: "Cancelado" },
 ] as const;
+
+const DOC_STATUS_LABEL = Object.fromEntries(DOC_STATUS_OPTIONS.map((o) => [o.value, o.label]));
+
+function salePipelineStatusLabel(status: string): string {
+  const m: Record<string, string> = {
+    aguarda_instalacao: "Aguardando instalação",
+    em_aberto: "Em aberto / problema técnico",
+    activo: "Activo",
+    cancelado: "Cancelado",
+    e_switch: "e-switch (legado)",
+    pendente: "Pendente (legado)",
+    nao_fechou: "Não fechou (legado)",
+  };
+  return m[status] || status;
+}
 
 type PipelineRow = {
   id: number;
@@ -57,10 +73,31 @@ type PipelineRow = {
   dataAtivacao?: Date | string | null;
   publicSaleId?: string | null;
   saleContractDossier?: string | null;
+  titularTroca?: boolean;
+  portabilidadeMovel?: boolean;
+  portabilidadeFixa?: boolean;
+  desativacaoApoiada?: boolean;
+  antigoTitularNome?: string | null;
+  antigoTitularNif?: string | null;
+  statusDocumentacao?: string | null;
   contactName?: string | null;
   contactPhone?: string | null;
   vendedorName?: string | null;
 };
+
+function isDossierFieldVisible(
+  key: string,
+  services: {
+    portabilidadeMovel: boolean;
+    portabilidadeFixa: boolean;
+    titularTroca: boolean;
+    desativacaoApoiada: boolean;
+  },
+): boolean {
+  if ((MOBILE_TECH_KEYS as readonly string[]).includes(key)) return services.portabilidadeMovel;
+  if ((FIXED_TECH_KEYS as readonly string[]).includes(key)) return services.portabilidadeFixa;
+  return true;
+}
 
 function groupFieldsBySection(): Map<SaleContractDossierSection, SaleContractDossierFieldDef[]> {
   const map = new Map<SaleContractDossierSection, SaleContractDossierFieldDef[]>();
@@ -104,17 +141,19 @@ export default function Acompanhamento() {
   const [activatedTo, setActivatedTo] = useState("");
   const [sheetSale, setSheetSale] = useState<PipelineRow | null>(null);
   const [form, setForm] = useState<Record<string, string>>({});
+  const [services, setServices] = useState({
+    titularTroca: false,
+    portabilidadeMovel: false,
+    portabilidadeFixa: false,
+    desativacaoApoiada: false,
+    antigoTitularNome: "",
+    antigoTitularNif: "",
+    statusDocumentacao: "pendente",
+  });
 
   const queryInput = useMemo(() => {
     const out: {
-      status?:
-        | "aguarda_instalacao"
-        | "em_aberto"
-        | "activo"
-        | "e_switch"
-        | "cancelado"
-        | "pendente"
-        | "nao_fechou";
+      status?: "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado";
       contactId?: number;
       createdFrom?: string;
       createdTo?: string;
@@ -176,6 +215,18 @@ export default function Acompanhamento() {
     onError: (e: { message?: string }) => toast.error(e.message || "Erro ao guardar"),
   });
 
+  const updateServicesMutation = trpc.sales.updateServices.useMutation({
+    onError: (e: { message?: string }) => toast.error(e.message || "Erro"),
+  });
+
+  const updateDocMutation = trpc.sales.updateDocumentacao.useMutation({
+    onError: (e: { message?: string }) => toast.error(e.message || "Erro"),
+  });
+
+  const pdfMutation = trpc.sales.generateContractPdfs.useMutation({
+    onError: (e: { message?: string }) => toast.error(e.message || "Erro ao gerar PDFs"),
+  });
+
   const activateMutation = trpc.sales.activateService.useMutation({
     onSuccess: async () => {
       toast.success("Serviço activado");
@@ -195,11 +246,49 @@ export default function Acompanhamento() {
       init[f.key] = d[f.key] ?? "";
     }
     setForm(init);
+    setServices({
+      titularTroca: !!sheetSale.titularTroca,
+      portabilidadeMovel: !!sheetSale.portabilidadeMovel,
+      portabilidadeFixa: !!sheetSale.portabilidadeFixa,
+      desativacaoApoiada: !!sheetSale.desativacaoApoiada,
+      antigoTitularNome: sheetSale.antigoTitularNome || "",
+      antigoTitularNif: sheetSale.antigoTitularNif || "",
+      statusDocumentacao: sheetSale.statusDocumentacao || "pendente",
+    });
   }, [sheetSale]);
 
-  const handleSaveDossier = () => {
+  const handleSaveDossier = async () => {
     if (!sheetSale) return;
+    await updateServicesMutation.mutateAsync({
+      saleId: sheetSale.id,
+      titularTroca: services.titularTroca,
+      portabilidadeMovel: services.portabilidadeMovel,
+      portabilidadeFixa: services.portabilidadeFixa,
+      desativacaoApoiada: services.desativacaoApoiada,
+      antigoTitularNome: services.antigoTitularNome.trim() || null,
+      antigoTitularNif: services.antigoTitularNif.trim() || null,
+    });
+    await updateDocMutation.mutateAsync({
+      saleId: sheetSale.id,
+      statusDocumentacao: services.statusDocumentacao as "pendente" | "enviado" | "assinado" | "back_office",
+    });
     saveDossier.mutate({ saleId: sheetSale.id, patch: form });
+  };
+
+  const handleDownloadPdfs = async () => {
+    if (!sheetSale) return;
+    const res = await pdfMutation.mutateAsync({ saleId: sheetSale.id });
+    const bin = atob(res.zipBase64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: "application/zip" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = res.downloadName || "contratos.zip";
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`${res.filenames.length} PDF(s) no ZIP`);
   };
 
   return (
@@ -238,7 +327,9 @@ export default function Acompanhamento() {
               onClick={async () => {
                 try {
                   const status = filter === "__all" ? "__all" : filter;
-                  const data = await exportCsvMutation.mutateAsync({ status: status as any });
+                  const data = await exportCsvMutation.mutateAsync({
+                    status: status as "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado" | "__all",
+                  });
                   if (!data?.csv) throw new Error("Exportação vazia");
                   const blob = new Blob([data.csv], { type: "text/csv;charset=utf-8" });
                   const url = URL.createObjectURL(blob);
@@ -312,24 +403,23 @@ export default function Acompanhamento() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-muted-foreground">
-                    <th className="p-3 font-medium">SALE_ID</th>
-                    <th className="p-3 font-medium">#</th>
-                    <th className="p-3 font-medium">Vendedor</th>
-                    <th className="p-3 font-medium">Contacto</th>
+                    <th className="p-3 font-medium">Cliente</th>
                     <th className="p-3 font-medium">Produto</th>
-                    <th className="p-3 font-medium">Estado</th>
-                    <th className="p-3 font-medium">Instalação</th>
-                    <th className="p-3 font-medium">Activação</th>
-                    <th className="p-3 font-medium">Ficha</th>
-                    <th className="p-3 font-medium w-[140px]">Acções</th>
+                    <th className="p-3 font-medium">Estado (instalação)</th>
+                    <th className="p-3 font-medium">Estado do contrato</th>
+                    <th className="p-3 font-medium">Data instalação</th>
+                    <th className="p-3 font-medium">Hora instalação</th>
+                    <th className="p-3 font-medium w-[150px]">Acções</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((r) => {
-                    const parsed = parseSaleContractDossier(r.saleContractDossier);
-                    const filled = dossierFilledCount(parsed);
-                    const total = SALE_CONTRACT_DOSSIER_FIELDS.length;
-                    const pct = total === 0 ? 0 : Math.round((filled / total) * 100);
+                    const inst = r.installationDate ? new Date(r.installationDate as unknown as string) : null;
+                    const instValid = inst && !Number.isNaN(inst.getTime());
+                    const docLabel =
+                      DOC_STATUS_LABEL[String(r.statusDocumentacao || "pendente")] ||
+                      r.statusDocumentacao ||
+                      "—";
                     return (
                       <tr
                         key={r.id}
@@ -340,41 +430,26 @@ export default function Acompanhamento() {
                             "bg-primary/10 ring-1 ring-inset ring-primary/20",
                         )}
                       >
-                        <td className="p-3 font-mono text-xs">{r.publicSaleId || "—"}</td>
-                        <td className="p-3 font-mono">{r.id}</td>
                         <td className="p-3">
-                          <div className="font-medium text-foreground">{r.vendedorName || "—"}</div>
-                          <div className="text-xs text-muted-foreground">#{r.vendedorId}</div>
-                        </td>
-                        <td className="p-3">
-                          <div>{r.contactName || "—"}</div>
+                          <div className="font-medium">{r.contactName || "—"}</div>
                           <div className="text-xs text-muted-foreground font-mono">{r.contactPhone || ""}</div>
                         </td>
                         <td className="p-3 capitalize">{r.product}</td>
-                        <td className="p-3">{r.status}</td>
+                        <td className="p-3">{salePipelineStatusLabel(r.status)}</td>
+                        <td className="p-3">{docLabel}</td>
                         <td className="p-3 whitespace-nowrap text-muted-foreground">
-                          {r.installationDate
-                            ? new Date(r.installationDate as unknown as string).toLocaleString("pt-PT", {
+                          {instValid
+                            ? inst!.toLocaleDateString("pt-PT", {
                                 dateStyle: "short",
-                                timeStyle: "short",
                               })
                             : "—"}
                         </td>
                         <td className="p-3 whitespace-nowrap text-muted-foreground">
-                          {r.dataAtivacao
-                            ? new Date(r.dataAtivacao as unknown as string).toLocaleString("pt-PT", {
-                                dateStyle: "short",
+                          {instValid
+                            ? inst!.toLocaleTimeString("pt-PT", {
                                 timeStyle: "short",
                               })
                             : "—"}
-                        </td>
-                        <td className="p-3">
-                          <div className="flex flex-col gap-1 min-w-[100px]">
-                            <Badge variant={filled === 0 ? "secondary" : "default"} className="w-fit text-xs">
-                              {filled}/{total}
-                            </Badge>
-                            <Progress value={pct} className="h-1.5" />
-                          </div>
                         </td>
                         <td className="p-3 space-y-2">
                           {canActivateService && r.status !== "activo" && r.status !== "cancelado" ? (
@@ -422,56 +497,256 @@ export default function Acompanhamento() {
         </CardContent>
       </Card>
 
-      <Sheet open={!!sheetSale} onOpenChange={(o) => !o && setSheetSale(null)}>
-        <SheetContent side="right" className="w-full sm:max-w-lg flex flex-col p-0 gap-0">
-          <SheetHeader className="p-6 pb-2 border-b shrink-0 text-left">
-            <SheetTitle>Ficha de contrato</SheetTitle>
-            <SheetDescription className="text-left">
-              Venda #{sheetSale?.id} · {sheetSale?.contactName || "Contacto"} — todos os campos opcionais; deixe em
-              branco o que ainda não tiver.
-            </SheetDescription>
-          </SheetHeader>
-          <ScrollArea className="flex-1 min-h-0 px-6">
-            <div className="space-y-8 py-4 pr-3">
-              {SECTION_ORDER.map((section) => {
-                const fields = FIELDS_BY_SECTION.get(section);
-                if (!fields?.length) return null;
-                return (
-                  <div key={section} className="space-y-3">
-                    <h3 className="text-sm font-semibold text-foreground border-b pb-1">
-                      {SALE_CONTRACT_DOSSIER_SECTION_LABELS[section]}
-                    </h3>
-                    <div className="grid grid-cols-1 gap-3">
-                      {fields.map((f) => (
-                        <div key={f.key} className="space-y-1.5">
-                          <Label htmlFor={f.key} className="text-xs text-muted-foreground font-normal">
-                            {f.label}
-                          </Label>
-                          <Input
-                            id={f.key}
-                            value={form[f.key] ?? ""}
-                            onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
-                            placeholder="—"
-                            className="h-9"
-                          />
+      <Dialog open={!!sheetSale} onOpenChange={(o) => !o && setSheetSale(null)}>
+        <DialogContent
+          showCloseButton
+          className="top-[50%] flex max-h-[min(92vh,900px)] w-[min(96vw,1040px)] max-w-[min(96vw,1040px)] translate-x-[-50%] translate-y-[-50%] flex-col gap-0 overflow-hidden p-0 sm:max-w-[min(96vw,1040px)]"
+        >
+          <DialogHeader className="shrink-0 space-y-1 border-b px-6 pt-6 pb-4 pr-14 text-left">
+            <DialogTitle>Ficha de contrato</DialogTitle>
+            <DialogDescription className="text-left">
+              {sheetSale?.publicSaleId ? (
+                <span className="font-mono">{sheetSale.publicSaleId}</span>
+              ) : (
+                <>Venda #{sheetSale?.id}</>
+              )}{" "}
+              · {sheetSale?.contactName || "Contacto"} — campos opcionais; CVP/KMAT e fixo só aparecem com
+              portabilidade activa.
+            </DialogDescription>
+          </DialogHeader>
+
+          <Tabs defaultValue="gerais" className="flex min-h-0 flex-1 flex-col gap-0">
+            <div className="shrink-0 border-b px-6 py-3">
+              <TabsList className="h-auto w-full flex-wrap justify-start gap-1 bg-transparent p-0">
+                <TabsTrigger value="gerais" className="data-[state=active]:bg-muted">
+                  Gerais
+                </TabsTrigger>
+                <TabsTrigger value="telecom" className="data-[state=active]:bg-muted">
+                  Serviços telecom
+                </TabsTrigger>
+                <TabsTrigger value="documentos" className="data-[state=active]:bg-muted">
+                  Documentos
+                </TabsTrigger>
+              </TabsList>
+            </div>
+
+            <TabsContent value="gerais" className="m-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+              <ScrollArea className="h-[min(52vh,520px)] px-6">
+                <div className="space-y-4 py-4 pr-3" id="sale-sheet-print-area">
+                  {sheetSale ? (
+                    <>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">SALE_ID</div>
+                          <div className="font-mono">{sheetSale.publicSaleId || "—"}</div>
                         </div>
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">Venda</div>
+                          <div className="font-mono">#{sheetSale.id}</div>
+                        </div>
+                        <div className="space-y-0.5 text-sm sm:col-span-2">
+                          <div className="text-xs text-muted-foreground">Contacto</div>
+                          <div>{sheetSale.contactName || "—"}</div>
+                          {sheetSale.contactPhone ? (
+                            <div className="font-mono text-xs text-muted-foreground">{sheetSale.contactPhone}</div>
+                          ) : null}
+                        </div>
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">Vendedor</div>
+                          <div>{sheetSale.vendedorName || "—"}</div>
+                          <div className="text-xs text-muted-foreground">#{sheetSale.vendedorId}</div>
+                        </div>
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">Produto</div>
+                          <div className="capitalize">{sheetSale.product}</div>
+                        </div>
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">Estado (instalação)</div>
+                          <div>{salePipelineStatusLabel(sheetSale.status)}</div>
+                        </div>
+                        <div className="space-y-0.5 text-sm sm:col-span-2">
+                          <div className="text-xs text-muted-foreground">Estado do contrato</div>
+                          <div>
+                            {DOC_STATUS_LABEL[String(sheetSale.statusDocumentacao || "pendente")] ||
+                              sheetSale.statusDocumentacao ||
+                              "—"}
+                          </div>
+                        </div>
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">Instalação</div>
+                          <div className="text-muted-foreground">
+                            {sheetSale.installationDate
+                              ? new Date(sheetSale.installationDate as unknown as string).toLocaleString("pt-PT", {
+                                  dateStyle: "short",
+                                  timeStyle: "short",
+                                })
+                              : "—"}
+                          </div>
+                        </div>
+                        <div className="space-y-0.5 text-sm">
+                          <div className="text-xs text-muted-foreground">Activação</div>
+                          <div className="text-muted-foreground">
+                            {sheetSale.dataAtivacao
+                              ? new Date(sheetSale.dataAtivacao as unknown as string).toLocaleString("pt-PT", {
+                                  dateStyle: "short",
+                                  timeStyle: "short",
+                                })
+                              : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  ) : null}
+                </div>
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="telecom" className="m-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+              <ScrollArea className="h-[min(52vh,520px)] px-6">
+                <div className="space-y-3 py-4 pr-3">
+                  <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
+                    <h3 className="text-sm font-semibold">Serviços e burocracia</h3>
+                    <div className="space-y-2">
+                      {(
+                        [
+                          ["titularTroca", "Troca de titularidade"],
+                          ["portabilidadeMovel", "Portabilidade móvel"],
+                          ["portabilidadeFixa", "Portabilidade fixa"],
+                          ["desativacaoApoiada", "Desativação apoiada"],
+                        ] as const
+                      ).map(([key, label]) => (
+                        <label key={key} className="flex items-center gap-2 text-sm">
+                          <Checkbox
+                            checked={services[key]}
+                            onCheckedChange={(v) =>
+                              setServices((s) => ({ ...s, [key]: v === true }))
+                            }
+                          />
+                          {label}
+                        </label>
                       ))}
                     </div>
+                    {(services.titularTroca || services.desativacaoApoiada) && (
+                      <div className="grid gap-2 border-t pt-2 sm:grid-cols-2">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Antigo titular — nome</Label>
+                          <Input
+                            value={services.antigoTitularNome}
+                            onChange={(e) =>
+                              setServices((s) => ({ ...s, antigoTitularNome: e.target.value }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">Antigo titular — NIF</Label>
+                          <Input
+                            value={services.antigoTitularNif}
+                            onChange={(e) =>
+                              setServices((s) => ({ ...s, antigoTitularNif: e.target.value }))
+                            }
+                          />
+                        </div>
+                      </div>
+                    )}
+                    <div className="space-y-1 border-t pt-2">
+                      <Label className="text-xs">Estado documentação</Label>
+                      <Select
+                        value={services.statusDocumentacao}
+                        onValueChange={(v) => setServices((s) => ({ ...s, statusDocumentacao: v }))}
+                      >
+                        <SelectTrigger className="h-9">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {DOC_STATUS_OPTIONS.map((o) => (
+                            <SelectItem key={o.value} value={o.value}>
+                              {o.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </div>
-                );
-              })}
+                </div>
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="documentos" className="m-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+              <ScrollArea className="h-[min(52vh,520px)] px-6">
+                <div className="space-y-8 py-4 pr-3">
+                  {SECTION_ORDER.map((section) => {
+                    const fields = FIELDS_BY_SECTION.get(section)?.filter((f) =>
+                      isDossierFieldVisible(f.key, services),
+                    );
+                    if (!fields?.length) return null;
+                    return (
+                      <div key={section} className="space-y-3">
+                        <h3 className="border-b pb-1 text-sm font-semibold text-foreground">
+                          {SALE_CONTRACT_DOSSIER_SECTION_LABELS[section]}
+                        </h3>
+                        <div className="grid grid-cols-1 gap-3">
+                          {fields.map((f) => (
+                            <div key={f.key} className="space-y-1.5">
+                              <Label htmlFor={f.key} className="text-xs font-normal text-muted-foreground">
+                                {f.label}
+                              </Label>
+                              <Input
+                                id={f.key}
+                                value={form[f.key] ?? ""}
+                                onChange={(e) => setForm((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                                placeholder="—"
+                                className="h-9"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </ScrollArea>
+            </TabsContent>
+          </Tabs>
+
+          <DialogFooter className="shrink-0 flex-col gap-2 border-t bg-muted/20 p-4 sm:flex-row sm:justify-between">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="gap-1.5"
+                disabled={pdfMutation.isPending}
+                onClick={() => void handleDownloadPdfs()}
+              >
+                <FileDown className="h-3.5 w-3.5" />
+                Baixar PDF
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => window.print()}
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Imprimir
+              </Button>
             </div>
-          </ScrollArea>
-          <SheetFooter className="p-4 border-t gap-2 shrink-0 flex-row sm:justify-end bg-muted/20">
-            <Button type="button" variant="outline" onClick={() => setSheetSale(null)}>
-              Cancelar
-            </Button>
-            <Button type="button" onClick={handleSaveDossier} disabled={saveDossier.isPending}>
-              {saveDossier.isPending ? "A guardar…" : "Guardar ficha"}
-            </Button>
-          </SheetFooter>
-        </SheetContent>
-      </Sheet>
+            <div className="flex gap-2 sm:ml-auto">
+              <Button type="button" variant="outline" onClick={() => setSheetSale(null)}>
+                Cancelar
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void handleSaveDossier()}
+                disabled={saveDossier.isPending || updateServicesMutation.isPending}
+              >
+                {saveDossier.isPending ? "A guardar…" : "Guardar ficha"}
+              </Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

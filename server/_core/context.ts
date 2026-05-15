@@ -23,7 +23,16 @@ export async function createContext(
     const openId = sdkUser?.openId;
     if (openId) {
       const dbUser = await getUserByOpenId(openId);
-      user = (dbUser as any) || (sdkUser as any);
+      const blocked =
+        dbUser &&
+        ((dbUser as { bloqueado?: unknown }).bloqueado === true ||
+          (dbUser as { bloqueado?: unknown }).bloqueado === 1 ||
+          (dbUser as { bloqueado?: unknown }).bloqueado === "1");
+      if (blocked) {
+        user = null;
+      } else {
+        user = (dbUser as any) || (sdkUser as any);
+      }
     } else {
       user = sdkUser as any;
     }

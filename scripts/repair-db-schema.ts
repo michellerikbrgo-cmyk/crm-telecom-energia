@@ -114,6 +114,33 @@ async function main() {
     await pool.query("ALTER TABLE `pendentes` ADD COLUMN `motivo_nao_fechamento_id` int NULL");
   }
 
+  console.log("[repair] Fase 3 — pendentes / sales (PEND-*, documentação)…");
+  for (const [col, def] of [
+    ["public_pending_id", "varchar(32) NULL"],
+    ["client_nif", "varchar(32) NULL"],
+    ["operadora_atual", "varchar(64) NULL"],
+    ["converted_sale_id", "int NULL"],
+  ] as const) {
+    if (!(await columnExists(pool, "pendentes", col))) {
+      await pool.query(`ALTER TABLE \`pendentes\` ADD COLUMN \`${col}\` ${def}`);
+    }
+  }
+  if (!(await indexExists(pool, "pendentes", "pendentes_public_pending_id_unique"))) {
+    await execIgnoreDup(
+      pool,
+      "CREATE UNIQUE INDEX `pendentes_public_pending_id_unique` ON `pendentes` (`public_pending_id`)",
+    );
+  }
+  if (!(await columnExists(pool, "sales", "status_documentacao"))) {
+    await pool.query(`
+      ALTER TABLE \`sales\`
+        ADD COLUMN \`status_documentacao\` enum('pendente','enviado','assinado','back_office') NOT NULL DEFAULT 'pendente',
+        ADD COLUMN \`portabilidade_movel\` tinyint NOT NULL DEFAULT 0,
+        ADD COLUMN \`portabilidade_fixa\` tinyint NOT NULL DEFAULT 0,
+        ADD COLUMN \`desativacao_apoiada\` tinyint NOT NULL DEFAULT 0
+    `);
+  }
+
   console.log("[repair] users (login)…");
   if (!(await columnExists(pool, "users", "nif"))) {
     await pool.query("ALTER TABLE `users` ADD COLUMN `nif` varchar(20) NULL");
@@ -162,6 +189,21 @@ async function main() {
       1778250020000,
     ]);
     console.log("[repair] Registada migração 0028 em __drizzle_migrations");
+  }
+
+  const file0029 = path.join(process.cwd(), "drizzle", "0029_phase3_pendentes_sales_docs.sql");
+  const sql0029 = fs.readFileSync(file0029, "utf8");
+  const hash0029 = crypto.createHash("sha256").update(sql0029).digest("hex");
+  const [existing29] = await pool.query<mysql.RowDataPacket[]>(
+    "SELECT hash FROM __drizzle_migrations WHERE hash = ? LIMIT 1",
+    [hash0029],
+  );
+  if (existing29.length === 0) {
+    await pool.query("INSERT INTO __drizzle_migrations (hash, created_at) VALUES (?, ?)", [
+      hash0029,
+      1778250021000,
+    ]);
+    console.log("[repair] Registada migração 0029 em __drizzle_migrations");
   }
 
   await pool.end();

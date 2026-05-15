@@ -147,15 +147,12 @@ export const contacts = mysqlTable("contacts", {
   origin: varchar("origin", { length: 100 }).default("Telemarketing").notNull(),
   status: mysqlEnum("status", [
     "novo",
-    "em_contacto",
     "pendente",
     "venda",
     "nao_atende",
     "sem_interesse",
     "blacklist",
-    "outros",
     "sem_cobertura_fibra",
-    "fidelizado",
   ]).default("novo").notNull(),
   assignedTo: int("assignedTo"),
   lastAssignedAt: timestamp("lastAssignedAt"),
@@ -263,6 +260,16 @@ export const pendentes = mysqlTable("pendentes", {
   notified: boolean("notified").default(false).notNull(),
   /** 1 = mais fraco … 5 = mais forte (prioridade nos alertas). */
   priorityLevel: tinyint("priorityLevel", { unsigned: true }).default(3).notNull(),
+  /** Identificador legível (ex.: PEND-2026-1024). */
+  publicPendingId: varchar("public_pending_id", { length: 32 }),
+  clientNif: varchar("client_nif", { length: 32 }),
+  operadoraAtual: varchar("operadora_atual", { length: 64 }),
+  /** Venda criada na conversão pré-venda → venda. */
+  convertedSaleId: int("converted_sale_id"),
+  /** Resumo obrigatório na edição (operacional) — o que foi dito na chamada. */
+  historicoChamada: text("historico_chamada"),
+  /** Quem criou o registo (discador / formulário); pode coincidir com vendedorId. */
+  criadorId: int("criador_id"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
@@ -477,6 +484,17 @@ export const sales = mysqlTable("sales", {
   motivoNaoFechamentoId: int("motivo_nao_fechamento_id"),
   preAgendamentoAt: timestamp("pre_agendamento_at"),
   titularTroca: boolean("titular_troca").default(false).notNull(),
+  portabilidadeMovel: boolean("portabilidade_movel").default(false).notNull(),
+  portabilidadeFixa: boolean("portabilidade_fixa").default(false).notNull(),
+  desativacaoApoiada: boolean("desativacao_apoiada").default(false).notNull(),
+  statusDocumentacao: mysqlEnum("status_documentacao", [
+    "pendente",
+    "enviado",
+    "assinado",
+    "back_office",
+  ])
+    .default("pendente")
+    .notNull(),
   /** JSON: campos extendidos do formulário de venda/pendente. */
   saleDetailJson: text("sale_detail_json"),
   /** JSON (texto): campos opcionais da ficha de contrato — ver shared/saleContractDossier.ts */

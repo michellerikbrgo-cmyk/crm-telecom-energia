@@ -204,6 +204,27 @@
       "when": 1778250020000,
       "tag": "0028_crm_multitenant_extensions",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "5",
+      "when": 1778250021000,
+      "tag": "0029_phase3_pendentes_sales_docs",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "5",
+      "when": 1778250022000,
+      "tag": "0030_contact_status_and_pendente_historico",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "5",
+      "when": 1778250023000,
+      "tag": "0031_pendentes_criador_idempotent_columns",
+      "breakpoints": true
     }
   ]
 }
