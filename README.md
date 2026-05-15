@@ -1,6 +1,20 @@
 # CRM Telecom Energia
 
-Aplicação web para gestão comercial (contactos, campanhas, contratos, relatórios, equipa, etc.) com **multi-tenant**, API **tRPC** e base de dados **MySQL** via **Drizzle ORM**.
+Aplicação web para gestão comercial (contactos, campanhas, contratos, relatórios, equipa, etc.) com **multi-tenant** (empresa → sub-empresa → membros), API **tRPC** e base de dados **MySQL** via **Drizzle ORM**.
+
+## Hierarquia e isolamento (tenant)
+
+| Nível | Na aplicação | Dados principais |
+|-------|----------------|------------------|
+| **Super Admin** | `users.isSuperAdmin` | Visão global; sem filtro de empresa |
+| **Empresa (coordenador)** | `crmRole = coordenador`, `users.tenantId = id` do coordenador | Tabela `companies` (raiz): `coordinatorUserId` = id do coordenador |
+| **Sub-empresa (chefe de equipa)** | `crmRole = ce`, `users.companyId` = linha em `companies` com `parentCompanyId` ≠ null | Equipa em `teams` ligada à mesma sub-empresa (`teams.companyId`) |
+| **Membros** | `crmRole = vendedor` ou `cej` | `companyId` da sub-empresa (ou raiz se ainda sem equipa, conforme migração) |
+
+- **Contactos:** `contacts.tenantId` mantém o tenant do coordenador; **`contacts.companyId`** restringe visibilidade entre chefes de equipa (filtros em `server/tenantScope.ts` e `assertEntityTenant` em `server/routers.ts`).
+- **Criação de utilizadores:** `authLocal.register` — coordenador (ou Super Admin a nomear empresa) cria **CE** com transacção atómica (sub-empresa + utilizador + equipa); **CE / CEJ** criam membros só na sua sub-empresa. Campos opcionais no registo: `rootCompanyName`, `subCompanyName`, `targetCompanyId` (ver schema Zod no servidor).
+
+Migração de referência: `drizzle/0024_companies_hierarchy.sql` (tabela `companies` + colunas `companyId` + backfill a partir de coordenadores e equipas existentes).
 
 ## Stack
 
@@ -57,6 +71,12 @@ Não commits o `.env`; mantém credenciais só no servidor ou gestor de segredos
 | Queries a `pendentes` com erro e menção a `priorityLevel` | Aplicar migrações: `pnpm exec drizzle-kit migrate` (add coluna `priorityLevel` em `0013_pendentes_priority.sql`). |
 | `401 Incorrect API key` da OpenAI ao usar só Gemini | Confirme que a chave Gemini está no campo **Gemini** / `GEMINI_API_KEY` e em Super Admin escolha **Gemini** como fornecedor preferido. Remova valores inválidos de `OPENAI_API_KEY` no `.env`. |
 | `ai.roleplayTurn` 404 | Actualize o servidor com `pnpm run build` + reinício (o bundle antigo pode não expor o procedure). |
+| Erros por colunas em falta (`pricingPlansEnabled`, `completedAt`, `companyId`, etc.) | Correr `pnpm exec drizzle-kit migrate` com `DATABASE_URL` correcto; em produção `pnpm run deploy:pm2` já executa migrate antes do build. |
+
+## Beta (sugestões / roadmap)
+
+- Página **`/beta`:** envio de sugestões, roadmap global de aceites/concluídas, cronómetro até remoção automática das concluídas (`BETA_COMPLETED_RETENTION_DAYS` em `shared/const.ts`, cálculo em `shared/betaRetention.ts`).
+- **`/beta/revisao`:** fila de pendentes (aceitar/recusar) para coordenadores e Super Admin; acesso pelo botão na página Beta (sem item separado no menu lateral).
 
 ## API
 
@@ -76,7 +96,7 @@ Não commits o `.env`; mantém credenciais só no servidor ou gestor de segredos
 | `pnpm test` | Testes (Vitest) |
 | `pnpm check` | Verificação TypeScript (`tsc --noEmit`) |
 | `pnpm exec drizzle-kit migrate` | Aplica migrações SQL em `drizzle/` (requer `DATABASE_URL`) |
-| `pnpm run deploy:pm2` | Build + **registo no log de actualização** (`data/release-log.json`) + `pm2 restart crm`. Opcional: `DEPLOY_NOTES="texto"` ou `DEPLOY_REF` / `GITHUB_SHA`. |
+| `pnpm run deploy:pm2` | **`drizzle-kit migrate`** + build + **registo no log de actualização** (`data/release-log.json`) + `pm2 restart crm`. Opcional: `DEPLOY_NOTES="texto"` ou `DEPLOY_REF` / `GITHUB_SHA`. |
 
 Guia legível de melhorias (editar no Git e fazer deploy para aparecer na Super Admin): **`shared/ATUALIZACOES.md`**.
 
@@ -90,6 +110,7 @@ pnpm exec drizzle-kit generate
 
 - Schema: `drizzle/schema.ts`
 - Migrações SQL: pasta `drizzle/` (ficheiros numerados + `meta/`)
+- Cópias de segurança manuais do código (opcional): `local/backups/` — ver `local/LEIAME.txt` (conteúdo local não versionado excepto o guia).
 
 Em produção, após atualizar código:
 
@@ -109,8 +130,8 @@ chown -R deployuser:deployuser /var/www/crm-telecom-energia/data/uploads   # aju
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm exec drizzle-kit migrate   # com DATABASE_URL carregada (também incluído em `pnpm run deploy:pm2`)
 pnpm run build
-pnpm exec drizzle-kit migrate   # com DATABASE_URL carregada
 node dist/index.js              # ou PM2, systemd, etc.
 ```
 

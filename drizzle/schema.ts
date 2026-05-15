@@ -1,4 +1,18 @@
-import { int, mysqlEnum, mysqlTable, text, timestamp, tinyint, varchar, boolean, bigint, uniqueIndex } from "drizzle-orm/mysql-core";
+import {
+  int,
+  mysqlEnum,
+  mysqlTable,
+  text,
+  timestamp,
+  tinyint,
+  varchar,
+  boolean,
+  bigint,
+  uniqueIndex,
+  date,
+  primaryKey,
+  index,
+} from "drizzle-orm/mysql-core";
 
 // ============ USERS ============
 export const users = mysqlTable("users", {
@@ -32,6 +46,12 @@ export const users = mysqlTable("users", {
   lastSeenGeo: varchar("lastSeenGeo", { length: 255 }),
   /** URL servida via `/manus-storage/...` após upload local. */
   avatarUrl: varchar("avatarUrl", { length: 512 }),
+  nif: varchar("nif", { length: 20 }),
+  sfid: varchar("sfid", { length: 64 }),
+  /** Bloqueio de login (RH / coordenação). */
+  bloqueado: boolean("bloqueado").default(false).notNull(),
+  /** Chefe de Equipa Júnior (CEJ) a que o vendedor reporta, quando aplicável. */
+  teamLeaderJuniorId: int("team_leader_junior_id"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -125,9 +145,22 @@ export const contacts = mysqlTable("contacts", {
   address: text("address"),
   postalCode: varchar("postalCode", { length: 10 }),
   origin: varchar("origin", { length: 100 }).default("Telemarketing").notNull(),
-  status: mysqlEnum("status", ["novo", "em_contacto", "pendente", "venda", "nao_atende", "sem_interesse", "blacklist"]).default("novo").notNull(),
+  status: mysqlEnum("status", [
+    "novo",
+    "em_contacto",
+    "pendente",
+    "venda",
+    "nao_atende",
+    "sem_interesse",
+    "blacklist",
+    "outros",
+    "sem_cobertura_fibra",
+    "fidelizado",
+  ]).default("novo").notNull(),
   assignedTo: int("assignedTo"),
   lastAssignedAt: timestamp("lastAssignedAt"),
+  /** Após qualificação «sem interesse» / «outros»: não voltar ao discador até esta data. */
+  discardUntil: timestamp("discardUntil"),
   attempts: int("attempts").default(0).notNull(),
   lastAttemptAt: timestamp("lastAttemptAt"),
   addedBy: int("addedBy"),
@@ -140,13 +173,82 @@ export const contacts = mysqlTable("contacts", {
   listName: varchar("listName", { length: 255 }),
   /** manual = formulário Contactos (48h exclusividade para outros vendedores); bulk = importação; import = legado. */
   addedSource: mysqlEnum("addedSource", ["manual", "bulk", "import", "system"]).default("import").notNull(),
+  /** Rótulo do lote na importação CSV (rastreabilidade). */
+  importBatchLabel: varchar("import_batch_label", { length: 255 }),
+  /** Data de referência de fidelização (obrigatória no fluxo do discador / feedback). */
+  dataFidelizacao: date("data_fidelizacao", { mode: "date" }),
   isLead: boolean("isLead").default(false).notNull(),
+  /** Cliente Vodafone (concorrente): excluído do discador; registo em `contact_subcontacts`. */
+  isVodafoneClient: boolean("isVodafoneClient").default(false).notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 });
 
 export type Contact = typeof contacts.$inferSelect;
+
+/** Sub-contactos (ex.: número classificado como cliente Vodafone); o contacto principal mantém-se. */
+export const contactSubcontacts = mysqlTable(
+  "contact_subcontacts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    contactId: int("contactId").notNull(),
+    phone: varchar("phone", { length: 20 }).notNull(),
+    category: varchar("category", { length: 32 }).default("vodafone_client").notNull(),
+    source: varchar("source", { length: 16 }).default("automatic").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => ({
+    uniqContactCategoryPhone: uniqueIndex("contact_subcontacts_contact_category_phone").on(
+      t.contactId,
+      t.category,
+      t.phone,
+    ),
+  }),
+);
+
+export type ContactSubcontact = typeof contactSubcontacts.$inferSelect;
+export type InsertContactSubcontact = typeof contactSubcontacts.$inferInsert;
 export type InsertContact = typeof contacts.$inferInsert;
+
+// ============ CALL FEEDBACK (pós-chamada atendida) ============
+export const callFeedback = mysqlTable("call_feedback", {
+  id: int("id").autoincrement().primaryKey(),
+  contactId: int("contactId").notNull(),
+  userId: int("userId").notNull(),
+  destination: varchar("destination", { length: 32 }).notNull(),
+  observacoes: text("observacoes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type CallFeedback = typeof callFeedback.$inferSelect;
+
+// ============ FIDELIZAÇÕES A TERMINAR ============
+export const fidelizacoesTerminando = mysqlTable("fidelizacoes_terminando", {
+  id: int("id").autoincrement().primaryKey(),
+  contactId: int("contactId").notNull(),
+  dataFimFidelizacao: date("data_fim_fidelizacao", { mode: "date" }).notNull(),
+  operadora: varchar("operadora", { length: 32 }).notNull(),
+  observacoes: text("observacoes"),
+  createdBy: int("createdBy").notNull(),
+  companyId: int("companyId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type FidelizacaoTerminando = typeof fidelizacoesTerminando.$inferSelect;
+
+// ============ NOTIFICAÇÕES INTERNAS (CRM) ============
+export const crmNotifications = mysqlTable("crm_notifications", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  type: varchar("type", { length: 32 }).default("info").notNull(),
+  message: text("message").notNull(),
+  link: varchar("link", { length: 512 }),
+  readAt: timestamp("readAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type CrmNotification = typeof crmNotifications.$inferSelect;
 
 // ============ PENDENTES ============
 export const pendentes = mysqlTable("pendentes", {
@@ -156,7 +258,8 @@ export const pendentes = mysqlTable("pendentes", {
   returnDate: timestamp("returnDate").notNull(),
   notes: text("notes"),
   offerDesired: text("offerDesired"),
-  status: mysqlEnum("status", ["agendado", "realizado", "expirado", "cancelado"]).default("agendado").notNull(),
+  status: mysqlEnum("status", ["agendado", "realizado", "expirado", "cancelado", "nao_fechou"]).default("agendado").notNull(),
+  motivoNaoFechamentoId: int("motivo_nao_fechamento_id"),
   notified: boolean("notified").default(false).notNull(),
   /** 1 = mais fraco … 5 = mais forte (prioridade nos alertas). */
   priorityLevel: tinyint("priorityLevel", { unsigned: true }).default(3).notNull(),
@@ -167,10 +270,20 @@ export const pendentes = mysqlTable("pendentes", {
 export type Pendente = typeof pendentes.$inferSelect;
 export type InsertPendente = typeof pendentes.$inferInsert;
 
+// ============ MOTIVOS NÃO FECHAMENTO ============
+export const motivosNaoFechamento = mysqlTable("motivos_nao_fechamento", {
+  id: int("id").autoincrement().primaryKey(),
+  descricao: varchar("descricao", { length: 255 }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type MotivoNaoFechamento = typeof motivosNaoFechamento.$inferSelect;
+
 // ============ CALENDAR EVENTS ============
 export const calendarEvents = mysqlTable("calendarEvents", {
   id: int("id").autoincrement().primaryKey(),
   tenantId: int("tenantId"),
+  companyId: int("company_id"),
   title: varchar("title", { length: 255 }).notNull(),
   description: text("description"),
   type: mysqlEnum("type", ["geral", "pendente", "venda", "instalacao"]).default("geral").notNull(),
@@ -186,6 +299,23 @@ export const calendarEvents = mysqlTable("calendarEvents", {
 
 export type CalendarEvent = typeof calendarEvents.$inferSelect;
 export type InsertCalendarEvent = typeof calendarEvents.$inferInsert;
+
+export const calendarEventInvitees = mysqlTable(
+  "calendar_event_invitees",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    eventId: int("event_id").notNull(),
+    userId: int("user_id").notNull(),
+    status: varchar("status", { length: 16 }).default("pending").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => ({
+    uniqEventUser: uniqueIndex("uniq_calendar_event_invitee").on(t.eventId, t.userId),
+  }),
+);
+
+export type CalendarEventInvitee = typeof calendarEventInvitees.$inferSelect;
 
 // ============ CONTRACTS ============
 export const contracts = mysqlTable("contracts", {
@@ -325,9 +455,30 @@ export const sales = mysqlTable("sales", {
   product: mysqlEnum("product", ["telecom", "energia"]).notNull(),
   offer: text("offer"),
   value: text("value"),
-  status: mysqlEnum("status", ["aguarda_instalacao", "em_aberto", "activo", "e_switch", "cancelado"]).default("aguarda_instalacao").notNull(),
+  status: mysqlEnum("status", [
+    "aguarda_instalacao",
+    "em_aberto",
+    "activo",
+    "e_switch",
+    "cancelado",
+    "pendente",
+    "nao_fechou",
+  ])
+    .default("aguarda_instalacao")
+    .notNull(),
   cancelReason: text("cancelReason"),
   installationDate: timestamp("installationDate"),
+  /** Data em que o serviço foi activado (ranking / relatórios). */
+  dataAtivacao: timestamp("data_ativacao"),
+  /** Identificador legível único (ex.: SALE-2026-01234). */
+  publicSaleId: varchar("public_sale_id", { length: 32 }),
+  antigoTitularNome: varchar("antigo_titular_nome", { length: 255 }),
+  antigoTitularNif: varchar("antigo_titular_nif", { length: 32 }),
+  motivoNaoFechamentoId: int("motivo_nao_fechamento_id"),
+  preAgendamentoAt: timestamp("pre_agendamento_at"),
+  titularTroca: boolean("titular_troca").default(false).notNull(),
+  /** JSON: campos extendidos do formulário de venda/pendente. */
+  saleDetailJson: text("sale_detail_json"),
   /** JSON (texto): campos opcionais da ficha de contrato — ver shared/saleContractDossier.ts */
   saleContractDossier: text("saleContractDossier"),
   closedAt: timestamp("closedAt").defaultNow().notNull(),
@@ -344,6 +495,8 @@ export const blacklist = mysqlTable(
   {
     id: int("id").autoincrement().primaryKey(),
     tenantId: int("tenantId"),
+    /** Sub-empresa — isolamento da lista negra no discador. */
+    companyId: int("company_id"),
     /** Equipa do chefe (mesmo teamId que users.teamId); null = linha antiga ou coordenador. */
     teamId: int("teamId"),
     phone: varchar("phone", { length: 20 }).notNull(),
@@ -352,7 +505,7 @@ export const blacklist = mysqlTable(
     createdAt: timestamp("createdAt").defaultNow().notNull(),
   },
   (t) => ({
-    uniqPhoneTenant: uniqueIndex("blacklist_phone_tenant").on(t.phone, t.tenantId),
+    idxPhoneCompany: index("idx_blacklist_phone_company").on(t.phone, t.companyId),
   }),
 );
 
@@ -427,3 +580,35 @@ export const sosRequests = mysqlTable("sosRequests", {
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   resolvedAt: timestamp("resolvedAt"),
 });
+
+// ============ GLOBAL API USAGE (Gemini, Tavily) — contagem por instalação, não por empresa ============
+export const systemApiUsage = mysqlTable(
+  "system_api_usage",
+  {
+    provider: varchar("provider", { length: 32 }).notNull(),
+    periodKey: varchar("periodKey", { length: 16 }).notNull(),
+    requestCount: int("requestCount", { unsigned: true }).default(0).notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.provider, t.periodKey] }),
+  }),
+);
+
+export const systemApiUsageAlerts = mysqlTable(
+  "system_api_usage_alerts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    provider: varchar("provider", { length: 32 }).notNull(),
+    periodKey: varchar("periodKey", { length: 16 }).notNull(),
+    alertCode: varchar("alertCode", { length: 32 }).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => ({
+    uniqProviderPeriodAlert: uniqueIndex("uniq_provider_period_alert").on(
+      t.provider,
+      t.periodKey,
+      t.alertCode,
+    ),
+  }),
+);

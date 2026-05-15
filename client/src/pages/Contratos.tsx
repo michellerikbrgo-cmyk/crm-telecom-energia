@@ -6,17 +6,28 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { FileText, Send, Eye, CheckCircle, Plus } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
+import { useSearch } from "wouter";
 
 export default function Contratos() {
+  const search = useSearch();
   const [showDialog, setShowDialog] = useState(false);
   const [newContract, setNewContract] = useState({
     contactId: "",
     type: "contrato",
     product: "telecom",
   });
+
+  useEffect(() => {
+    const idStr = new URLSearchParams(search).get("contactId");
+    if (!idStr) return;
+    const id = parseInt(idStr, 10);
+    if (!Number.isFinite(id) || id < 1) return;
+    setNewContract((s) => ({ ...s, contactId: String(id) }));
+    setShowDialog(true);
+  }, [search]);
 
   const contractsQuery = trpc.contracts.list.useQuery();
   const createMutation = trpc.contracts.create.useMutation({

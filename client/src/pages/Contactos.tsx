@@ -19,15 +19,22 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Phone, Search, Filter, UserPlus, PhoneCall, Pencil, AlertCircle } from "lucide-react";
+import { Phone, Search, Filter, UserPlus, PhoneCall, Pencil, AlertCircle, Download } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { trpc } from "@/lib/trpc";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { toast } from "sonner";
 import { TRPCClientError } from "@trpc/client";
 
-const KNOWN_ORIGINS = ["Indicação", "Telemarketing", "Website", "Redes Sociais", "Outro"] as const;
+const KNOWN_ORIGINS = [
+  "Indicação",
+  "Telemarketing",
+  "Website",
+  "Redes Sociais",
+  "Cliente Vodafone",
+  "Outro",
+] as const;
 
 const CONTACT_STATUSES = [
   ["todos", "Todos"],
@@ -35,15 +42,19 @@ const CONTACT_STATUSES = [
   ["em_contacto", "Em Contacto"],
   ["pendente", "Pendente"],
   ["venda", "Venda"],
+  ["fechado", "Fechado"],
   ["nao_atende", "Não Atende"],
   ["sem_interesse", "Sem Interesse"],
+  ["outros", "Outros"],
+  ["sem_cobertura_fibra", "Sem cobertura fibra"],
+  ["fidelizado", "Fidelizado"],
   ["blacklist", "Blacklist"],
 ] as const;
 
-const VALID_EDIT_STATUS = CONTACT_STATUSES.filter(([v]) => v !== "todos").map(([v]) => v);
+const VALID_EDIT_STATUS = CONTACT_STATUSES.filter(([v]) => v !== "todos" && v !== "fechado").map(([v]) => v);
 
 /** Estados válidos para contacts.update (sem filtro "todos"). */
-type ContactRowStatus = Exclude<(typeof CONTACT_STATUSES)[number][0], "todos">;
+type ContactRowStatus = Exclude<(typeof CONTACT_STATUSES)[number][0], "todos" | "fechado">;
 
 function useDebounced<T>(value: T, ms: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -92,6 +103,7 @@ function buildContactsAddPayload(form: {
 
 export default function Contactos() {
   const [, setLocation] = useLocation();
+  const searchString = useSearch();
   const { user } = useAuth();
   const crmRole = (user as any)?.crmRole || "vendedor";
   const isSuperAdmin = !!(user as any)?.isSuperAdmin;
@@ -101,6 +113,14 @@ export default function Contactos() {
   const [searchInput, setSearchInput] = useState("");
   const debouncedSearch = useDebounced(searchInput, 400);
   const [statusFilter, setStatusFilter] = useState<string>("todos");
+
+  useEffect(() => {
+    const params = new URLSearchParams(searchString);
+    const q = params.get("q");
+    if (q != null && q.trim()) {
+      setSearchInput(q.trim());
+    }
+  }, [searchString]);
 
   const listInput = useMemo(
     () => ({
@@ -114,9 +134,36 @@ export default function Contactos() {
     staleTime: 15_000,
   });
 
-  const contactRows = contactsQuery.data ?? [];
+  const countsQuery = trpc.contacts.countByStatus.useQuery(
+    { search: debouncedSearch.trim() || undefined },
+    { staleTime: 15_000 },
+  );
 
   const utils = trpc.useUtils();
+
+  const contactRows = contactsQuery.data ?? [];
+
+  const statusCount = (key: string) => {
+    if (key === "todos") return countsQuery.data?.total ?? 0;
+    if (key === "fechado") return countsQuery.data?.byStatus?.venda ?? 0;
+    return countsQuery.data?.byStatus?.[key] ?? 0;
+  };
+
+  const handleExport = async () => {
+    try {
+      const res = await utils.contacts.exportCsv.fetch(listInput);
+      const blob = new Blob([res.csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `contactos-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success(`Exportados ${res.count} contactos`);
+    } catch (err) {
+      toast.error(err instanceof TRPCClientError ? err.message : "Erro ao exportar");
+    }
+  };
 
   const handleGetNext = useCallback(async () => {
     try {
@@ -251,14 +298,21 @@ export default function Contactos() {
     em_contacto: "bg-yellow-100 text-yellow-700",
     pendente: "bg-orange-100 text-orange-700",
     venda: "bg-green-100 text-green-700",
+    fechado: "bg-emerald-100 text-emerald-800",
     nao_atende: "bg-gray-100 text-gray-700",
     sem_interesse: "bg-red-100 text-red-700",
+    outros: "bg-stone-100 text-stone-800",
+    sem_cobertura_fibra: "bg-slate-200 text-slate-800",
+    fidelizado: "bg-violet-100 text-violet-800",
     blacklist: "bg-black text-white",
   };
 
   const statusLabels = Object.fromEntries(
     CONTACT_STATUSES.filter(([k]) => k !== "todos").map(([k, l]) => [k, l]),
   );
+
+  const displayContactStatus = (s: string) =>
+    s === "venda" ? "Fechado" : statusLabels[s] || s;
 
   const listLoading = contactsQuery.isLoading && !contactsQuery.dataUpdatedAt;
 
@@ -376,7 +430,23 @@ export default function Contactos() {
         </div>
 
         <Card className="border-0 shadow-sm">
-          <CardContent className="py-3">
+          <CardContent className="py-3 space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {CONTACT_STATUSES.map(([value, label]) => (
+                <Button
+                  key={value}
+                  type="button"
+                  size="sm"
+                  variant={statusFilter === value ? "default" : "outline"}
+                  onClick={() => setStatusFilter(value)}
+                >
+                  {label}
+                  <Badge variant="secondary" className="ml-1.5 tabular-nums">
+                    {countsQuery.isLoading ? "…" : statusCount(value)}
+                  </Badge>
+                </Button>
+              ))}
+            </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <div className="relative flex-1 min-w-0">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground pointer-events-none" />
@@ -388,19 +458,10 @@ export default function Contactos() {
                   aria-busy={contactsQuery.isFetching}
                 />
               </div>
-              <Select value={statusFilter} onValueChange={setStatusFilter}>
-                <SelectTrigger className="w-full sm:w-[200px]" aria-label="Filtrar estado">
-                  <Filter className="mr-2 h-4 w-4 shrink-0" />
-                  <SelectValue placeholder="Estado" />
-                </SelectTrigger>
-                <SelectContent>
-                  {CONTACT_STATUSES.map(([value, label]) => (
-                    <SelectItem key={value} value={value}>
-                      {label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Button type="button" variant="outline" className="gap-2 shrink-0" onClick={() => void handleExport()}>
+                <Download className="h-4 w-4" />
+                Exportar CSV
+              </Button>
             </div>
           </CardContent>
         </Card>
@@ -464,9 +525,14 @@ export default function Contactos() {
                       <Badge
                         className={`text-xs ${statusColors[String((row as { status?: string }).status)] || ""}`}
                       >
-                        {statusLabels[String((row as { status?: string }).status)] ||
+                        {displayContactStatus(String((row as { status?: string }).status ?? "")) ||
                           String((row as { status?: unknown }).status ?? "")}
                       </Badge>
+                      {(row as { isVodafoneClient?: boolean }).isVodafoneClient ? (
+                        <Badge variant="outline" className="border-red-300 text-xs text-red-800">
+                          Cliente Vodafone
+                        </Badge>
+                      ) : null}
                       {canEditContact && (
                         <Button
                           type="button"

@@ -21,8 +21,32 @@ import {
 } from "@/components/ui/sidebar";
 // import { getLoginUrl } from "@/const";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, Users, Phone, Clock, FileText, Calculator, Megaphone, Trophy, Shield, AlertTriangle, BarChart3, Calendar, Zap, Bot, PhoneCall, User, Ban, ClipboardList, Beaker, CreditCard } from "lucide-react";
-import { CSSProperties, useEffect, useRef, useState } from "react";
+import {
+  LayoutDashboard,
+  LogOut,
+  PanelLeft,
+  Users,
+  Phone,
+  Clock,
+  FileText,
+  Calculator,
+  Megaphone,
+  Trophy,
+  Shield,
+  BarChart3,
+  Calendar,
+  Zap,
+  Bot,
+  PhoneCall,
+  User,
+  Ban,
+  ClipboardList,
+  Beaker,
+  CreditCard,
+  Bell,
+  type LucideIcon,
+} from "lucide-react";
+import { CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { DashboardLayoutSkeleton } from './DashboardLayoutSkeleton';
 import { SessionBar } from "@/components/SessionBar";
@@ -30,37 +54,36 @@ import { UserBroadcastBanner } from "@/components/UserBroadcastBanner";
 import { UserProfileDialog } from "@/components/UserProfileDialog";
 import { trpc } from "@/lib/trpc";
 import { Button } from "./ui/button";
+import { NAV_CATALOG, filterNavCatalog } from "@/crmNavCatalog";
+import { GlobalSearchCommand } from "@/components/GlobalSearchCommand";
+import { NotificationBell } from "@/components/NotificationBell";
 
-type MenuItem = {
-  icon: any;
-  label: string;
-  path: string;
-  roles?: string[];
+const NAV_ICONS: Record<string, LucideIcon> = {
+  "/painel": LayoutDashboard,
+  "/notificacoes": Bell,
+  "/beta": Beaker,
+  "/discador": PhoneCall,
+  "/acompanhamento": ClipboardList,
+  "/contactos": Phone,
+  "/lista-negra": Ban,
+  "/pendentes": Clock,
+  "/contratos": FileText,
+  "/calculadora": Calculator,
+  "/planos": CreditCard,
+  "/ia-objecoes": Bot,
+  "/campanhas": Megaphone,
+  "/ranking": Trophy,
+  "/calendario": Calendar,
+  "/supervisao": Shield,
+  "/relatorios": BarChart3,
+  "/equipa": Users,
+  "/auditoria": Shield,
+  "/base-dados": Zap,
+  "/utilizadores": Users,
+  "/super-admin": Shield,
 };
 
-const menuItems: MenuItem[] = [
-  { icon: LayoutDashboard, label: "Dashboard", path: "/painel", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Beaker, label: "Beta", path: "/beta", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: PhoneCall, label: "Discador", path: "/discador", roles: ["vendedor", "cej", "ce"] },
-  { icon: ClipboardList, label: "Acompanhamento", path: "/acompanhamento", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Phone, label: "Contactos", path: "/contactos", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Ban, label: "Lista negra", path: "/lista-negra", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Clock, label: "Pendentes", path: "/pendentes", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: FileText, label: "Contratos", path: "/contratos", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Calculator, label: "Calculadora", path: "/calculadora", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: CreditCard, label: "Planos (exemplo)", path: "/planos", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Bot, label: "IA Objeções", path: "/ia-objecoes", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Megaphone, label: "Campanhas", path: "/campanhas", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Trophy, label: "Ranking", path: "/ranking", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Calendar, label: "Calendário", path: "/calendario", roles: ["vendedor", "cej", "ce", "coordenador"] },
-  { icon: Shield, label: "Supervisão", path: "/supervisao", roles: ["cej", "ce", "coordenador"] },
-  { icon: BarChart3, label: "Relatórios", path: "/relatorios", roles: ["cej", "ce", "coordenador"] },
-  { icon: Users, label: "Equipa", path: "/equipa", roles: ["cej", "ce", "coordenador"] },
-  { icon: Shield, label: "Auditoria", path: "/auditoria", roles: ["ce", "coordenador"] },
-  { icon: Zap, label: "Base de Dados", path: "/base-dados", roles: ["ce", "coordenador"] },
-  { icon: Users, label: "Utilizadores", path: "/utilizadores", roles: ["cej", "ce", "coordenador"] },
-  { icon: Shield, label: "Super Admin", path: "/super-admin", roles: ["super_admin"] },
-];
+type MenuItem = { icon: LucideIcon; label: string; path: string };
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
 const DEFAULT_WIDTH = 280;
@@ -149,14 +172,18 @@ function DashboardLayoutContent({
   const pricingPlansQuery = trpc.system.getPricingPlansFeature.useQuery(undefined, {
     staleTime: 30_000,
   });
-  const filteredMenuItems = menuItems.filter(item => {
-    if (item.path === "/planos" && !pricingPlansQuery.data?.enabled) return false;
-    if (item.path === "/utilizadores" && userCrmRole === "vendedor") return false;
-    if (!item.roles) return true;
-    if (isSuperAdmin) return true;
-    if (item.roles.includes("super_admin")) return false;
-    return item.roles.includes(userCrmRole);
-  });
+  const filteredMenuItems: MenuItem[] = useMemo(() => {
+    const planosEnabled = !!pricingPlansQuery.data?.enabled;
+    return filterNavCatalog(NAV_CATALOG, {
+      crmRole: userCrmRole,
+      isSuperAdmin,
+      planosEnabled,
+    }).map((item) => ({
+      path: item.path,
+      label: item.label,
+      icon: NAV_ICONS[item.path] ?? LayoutDashboard,
+    }));
+  }, [userCrmRole, isSuperAdmin, pricingPlansQuery.data?.enabled]);
   const activeMenuItem = filteredMenuItems.find(item => item.path === location);
   const isMobile = useIsMobile();
 
@@ -318,18 +345,34 @@ function DashboardLayoutContent({
       />
 
       <SidebarInset>
-        {isMobile && (
-          <div className="flex border-b h-14 items-center justify-between bg-background/95 px-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur sticky top-0 z-40">
-            <div className="flex items-center gap-2">
-              <SidebarTrigger className="h-9 w-9 rounded-lg bg-background" />
-              <div className="flex items-center gap-3">
-                <div className="flex flex-col gap-1">
-                  <span className="tracking-tight text-foreground">
-                    {activeMenuItem?.label ?? "Menu"}
-                  </span>
-                </div>
+        {isMobile ? (
+          <div className="sticky top-0 z-40 border-b bg-background/95 px-2 py-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur space-y-2">
+            <div className="flex h-11 items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <SidebarTrigger className="h-9 w-9 shrink-0 rounded-lg bg-background" />
+                <span className="tracking-tight text-foreground truncate text-sm">
+                  {activeMenuItem?.label ?? "Menu"}
+                </span>
               </div>
+              <NotificationBell />
             </div>
+            <GlobalSearchCommand
+              crmRole={userCrmRole}
+              isSuperAdmin={isSuperAdmin}
+              planosEnabled={!!pricingPlansQuery.data?.enabled}
+              className="w-full"
+            />
+          </div>
+        ) : (
+          <div className="sticky top-0 z-40 flex items-center gap-2 border-b bg-background/95 px-4 py-2 backdrop-blur supports-[backdrop-filter]:backdrop-blur">
+            <GlobalSearchCommand
+              crmRole={userCrmRole}
+              isSuperAdmin={isSuperAdmin}
+              planosEnabled={!!pricingPlansQuery.data?.enabled}
+              className="flex-1 max-w-xl"
+            />
+            <div className="flex-1 min-w-2" aria-hidden />
+            <NotificationBell />
           </div>
         )}
         <main className="flex-1 flex flex-col gap-4 p-4 min-h-0">

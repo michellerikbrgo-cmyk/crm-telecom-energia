@@ -80,6 +80,10 @@ export const authLocalRouter = router({
         throw new Error("E-mail ou senha incorretos");
       }
 
+      if (truthyFlag((user as { bloqueado?: boolean }).bloqueado)) {
+        throw new Error("Acesso bloqueado. Contacte o coordenador ou RH.");
+      }
+
       const token = await sdk.createSessionToken(user.openId, {
         name: (user.name?.trim() || user.email || "Utilizador").slice(0, 200),
       });
@@ -356,6 +360,12 @@ export const authLocalRouter = router({
       createdAt: users.createdAt,
       companyId: users.companyId,
       companyName: coordinator.name,
+      nif: users.nif,
+      sfid: users.sfid,
+      bloqueado: users.bloqueado,
+      avatarUrl: users.avatarUrl,
+      teamLeaderJuniorId: users.teamLeaderJuniorId,
+      teamId: users.teamId,
     };
 
     if (isSuperAdminUser(currentUser)) {
@@ -434,5 +444,109 @@ export const authLocalRouter = router({
     }
 
     return [];
+  }),
+
+  updateUser: protectedProcedure
+    .input(
+      z.object({
+        id: z.number().int().positive(),
+        name: z.string().min(1).max(200).optional(),
+        nif: z.string().max(20).nullable().optional(),
+        sfid: z.string().max(64).nullable().optional(),
+        bloqueado: z.boolean().optional(),
+        teamLeaderJuniorId: z.number().int().positive().nullable().optional(),
+        password: z.string().min(6).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const db = await getDb();
+      if (!db) throw new Error("Base de dados indisponível");
+      const currentUser = ctx.user as Record<string, unknown>;
+      if (!canListUsersDirectory(currentUser)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Sem permissão para editar utilizadores." });
+      }
+
+      const [target] = await db.select().from(users).where(eq(users.id, input.id)).limit(1);
+      if (!target) throw new Error("Utilizador não encontrado");
+
+      if (!isSuperAdminUser(currentUser)) {
+        const role = String(currentUser.crmRole || "");
+        const tid =
+          currentUser.tenantId != null
+            ? Number(currentUser.tenantId)
+            : role === "coordenador"
+              ? Number(currentUser.id)
+              : NaN;
+        if (Number.isNaN(tid) || Number(target.tenantId) !== tid) {
+          throw new Error("Utilizador de outra empresa.");
+        }
+        if (role === "cej" && target.crmRole !== "vendedor") {
+          throw new Error("CEJ só pode editar vendedores da sua equipa.");
+        }
+        if (role === "ce" && !["vendedor", "cej"].includes(String(target.crmRole))) {
+          throw new Error("CE só pode editar vendedores e CEJ da sua equipa.");
+        }
+        if (role === "coordenador" && target.crmRole === "coordenador" && target.id !== currentUser.id) {
+          throw new Error("Não pode editar outro coordenador.");
+        }
+      }
+
+      const patch: Record<string, unknown> = {};
+      if (input.name !== undefined) patch.name = input.name.trim();
+      if (input.nif !== undefined) patch.nif = input.nif;
+      if (input.sfid !== undefined) patch.sfid = input.sfid;
+      if (input.bloqueado !== undefined) patch.bloqueado = input.bloqueado;
+      if (input.teamLeaderJuniorId !== undefined) {
+        if (String(target.crmRole) !== "vendedor") {
+          throw new Error("CEJ só se aplica a vendedores.");
+        }
+        if (input.teamLeaderJuniorId != null) {
+          const [cej] = await db
+            .select({ id: users.id, crmRole: users.crmRole, tenantId: users.tenantId })
+            .from(users)
+            .where(eq(users.id, input.teamLeaderJuniorId))
+            .limit(1);
+          if (!cej || cej.crmRole !== "cej") throw new Error("CEJ inválido.");
+          if (
+            !isSuperAdminUser(currentUser) &&
+            Number(cej.tenantId) !== Number(target.tenantId)
+          ) {
+            throw new Error("CEJ de outra empresa.");
+          }
+        }
+        patch.teamLeaderJuniorId = input.teamLeaderJuniorId;
+      }
+      if (input.password) {
+        patch.password = await bcrypt.hash(input.password, 10);
+        patch.loginMethod = "local";
+      }
+      if (Object.keys(patch).length === 0) return { success: true };
+
+      await db.update(users).set(patch as any).where(eq(users.id, input.id));
+      return { success: true };
+    }),
+
+  listCejForAssignment: protectedProcedure.query(async ({ ctx }) => {
+    const db = await getDb();
+    if (!db) return [];
+    const currentUser = ctx.user as Record<string, unknown>;
+    if (!canListUsersDirectory(currentUser)) return [];
+
+    const parts: ReturnType<typeof eq>[] = [eq(users.crmRole, "cej")];
+    if (!isSuperAdminUser(currentUser)) {
+      const tid =
+        currentUser.tenantId != null
+          ? Number(currentUser.tenantId)
+          : String(currentUser.crmRole) === "coordenador"
+            ? Number(currentUser.id)
+            : NaN;
+      if (!Number.isNaN(tid)) parts.push(eq(users.tenantId, tid));
+    }
+
+    return db
+      .select({ id: users.id, name: users.name })
+      .from(users)
+      .where(and(...parts))
+      .orderBy(users.name);
   }),
 });

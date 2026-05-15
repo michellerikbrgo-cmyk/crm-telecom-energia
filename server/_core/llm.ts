@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { incrementGlobalApiUsage } from "./globalApiUsage";
 import {
   loadLlmKeyBundle,
   resolveChatBackendOrder,
@@ -796,6 +797,8 @@ async function invokeGeminiChat(
       (typeof rawJson === "object" ? JSON.stringify(rawJson) : response.statusText);
     throw new Error(`Gemini: ${response.status} – ${msg}`);
   }
+
+  void incrementGlobalApiUsage("gemini");
 
   const candidates = rawJson.candidates as
     | Array<{

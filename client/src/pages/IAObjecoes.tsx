@@ -10,17 +10,27 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Bot, Send, Sparkles, GraduationCap, RotateCcw, User } from "lucide-react";
+import { Bot, Send, Sparkles, GraduationCap, RotateCcw, User, Globe2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { trpc } from "@/lib/trpc";
 import { Streamdown } from "streamdown";
 import { toast } from "sonner";
+import { useSearch } from "wouter";
 
 type Topic = "telecom" | "energia" | "ambos";
 
 type ChatTurn = { role: "customer" | "seller"; content: string };
 
+type MercadoScope = "vodafone" | "competitors" | "geral";
+
 export default function IAObjecoes() {
+  const search = useSearch();
+  const [activeTab, setActiveTab] = useState("assistente");
+
+  useEffect(() => {
+    const t = new URLSearchParams(search).get("tab");
+    if (t === "mercado") setActiveTab("mercado");
+  }, [search]);
   const [objection, setObjection] = useState("");
   const [response, setResponse] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -96,6 +106,20 @@ export default function IAObjecoes() {
     setSellerInput("");
   };
 
+  const [mercadoScope, setMercadoScope] = useState<MercadoScope>("geral");
+  const [mercadoExtra, setMercadoExtra] = useState("");
+  const [mercadoResult, setMercadoResult] = useState("");
+  const [mercadoSources, setMercadoSources] = useState<{ title: string; url: string }[]>([]);
+
+  const marketMutation = trpc.ai.marketResearch.useMutation({
+    onSuccess: (d) => {
+      setMercadoResult(d.response);
+      setMercadoSources(d.sources ?? []);
+      toast.success("Síntese pronta");
+    },
+    onError: (e: { message?: string }) => toast.error(e.message || "Erro na pesquisa"),
+  });
+
   const rpLoading = roleplayMutation.isPending;
 
   return (
@@ -107,7 +131,7 @@ export default function IAObjecoes() {
         </p>
       </div>
 
-      <Tabs defaultValue="assistente" className="space-y-4">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
         <TabsList>
           <TabsTrigger value="assistente" className="gap-2">
             <Bot className="h-4 w-4" />
@@ -116,6 +140,10 @@ export default function IAObjecoes() {
           <TabsTrigger value="simulador" className="gap-2">
             <GraduationCap className="h-4 w-4" />
             Simulador
+          </TabsTrigger>
+          <TabsTrigger value="mercado" className="gap-2">
+            <Globe2 className="h-4 w-4" />
+            Mercado (web)
           </TabsTrigger>
         </TabsList>
 
@@ -282,6 +310,90 @@ export default function IAObjecoes() {
               )}
             </CardContent>
           </Card>
+        </TabsContent>
+
+        <TabsContent value="mercado" className="space-y-4">
+          <Card className="border-0 shadow-sm">
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <Globe2 className="h-5 w-5 text-primary" />
+                Pesquisa de mercado
+              </CardTitle>
+              <p className="text-sm text-muted-foreground font-normal leading-relaxed">
+                Combina pesquisa na internet (ofertas{" "}
+                <strong className="text-foreground/90 font-medium">Vodafone.pt</strong> e{" "}
+                <strong className="text-foreground/90 font-medium">concorrentes</strong> em Portugal) com síntese por
+                IA. O administrador deve configurar <code className="text-xs bg-muted px-1 rounded">TAVILY_API_KEY</code>{" "}
+                no servidor. Os preços mudam — confirme sempre no site oficial.
+              </p>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2 max-w-xs">
+                <span className="text-sm font-medium">Âmbito</span>
+                <Select value={mercadoScope} onValueChange={(v) => setMercadoScope(v as MercadoScope)}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="geral">Vodafone + concorrentes</SelectItem>
+                    <SelectItem value="vodafone">Só Vodafone (site)</SelectItem>
+                    <SelectItem value="competitors">Só concorrentes (MEO, NOS, etc.)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <span className="text-sm font-medium">Palavras-chave extra</span>
+                <Textarea
+                  placeholder="Ex.: pacote família, 1 Gbps, TV 4K…"
+                  value={mercadoExtra}
+                  onChange={(e) => setMercadoExtra(e.target.value)}
+                  className="min-h-[72px] resize-none max-w-xl"
+                />
+              </div>
+              <Button
+                type="button"
+                className="gap-2"
+                disabled={marketMutation.isPending}
+                onClick={() =>
+                  marketMutation.mutate({ scope: mercadoScope, extra: mercadoExtra.trim() || undefined })
+                }
+              >
+                {marketMutation.isPending ? (
+                  <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                ) : (
+                  <Sparkles className="h-4 w-4" />
+                )}
+                {marketMutation.isPending ? "A pesquisar…" : "Pesquisar e sintetizar"}
+              </Button>
+            </CardContent>
+          </Card>
+
+          {mercadoResult ? (
+            <Card className="border-0 shadow-sm border-l-4 border-l-primary">
+              <CardHeader>
+                <CardTitle className="text-lg">Resumo para o pitch</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="prose prose-sm max-w-none dark:prose-invert">
+                  <Streamdown>{mercadoResult}</Streamdown>
+                </div>
+                {mercadoSources.length > 0 ? (
+                  <div className="text-sm border-t pt-3">
+                    <div className="font-medium text-foreground mb-2">Fontes</div>
+                    <ul className="list-disc pl-5 space-y-1 text-muted-foreground">
+                      {mercadoSources.map((s) => (
+                        <li key={s.url}>
+                          <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                            {s.title}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
         </TabsContent>
       </Tabs>
     </div>

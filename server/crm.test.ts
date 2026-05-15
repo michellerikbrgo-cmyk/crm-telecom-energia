@@ -139,4 +139,18 @@ describe("CRM Router Structure", () => {
   it("should have system.getUserBroadcastAlert", () => {
     expect(appRouter._def.procedures).toHaveProperty("system.getUserBroadcastAlert");
   });
+
+  it("should expose feedback.submitFeedback, feedback.submitAfterAnswered, notifications and search", () => {
+    expect(appRouter._def.procedures).toHaveProperty("feedback.submitFeedback");
+    expect(appRouter._def.procedures).toHaveProperty("feedback.submitAfterAnswered");
+    expect(appRouter._def.procedures).toHaveProperty("notifications.list");
+    expect(appRouter._def.procedures).toHaveProperty("notifications.unreadCount");
+    expect(appRouter._def.procedures).toHaveProperty("notifications.markRead");
+    expect(appRouter._def.procedures).toHaveProperty("notifications.markAllRead");
+    expect(appRouter._def.procedures).toHaveProperty("search.global");
+  });
+
+  it("should expose ai.marketResearch for web-assisted training", () => {
+    expect(appRouter._def.procedures).toHaveProperty("ai.marketResearch");
+  });
 });

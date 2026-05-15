@@ -10,6 +10,7 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { registerPaymentWebhooks } from "../payments/registerWebhooks";
+import { runPendingMigrations } from "../runPendingMigrations";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -31,6 +32,13 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  try {
+    await runPendingMigrations();
+  } catch (e) {
+    console.error("[migrate] Falha ao aplicar migrações — o servidor não vai arrancar.", e);
+    process.exit(1);
+  }
+
   const app = express();
   /**
    * IP real atrás de Nginx / Cloudflare. `TRUST_PROXY`: número de proxies (ex.: 2),

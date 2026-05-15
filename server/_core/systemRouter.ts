@@ -40,8 +40,18 @@ export const systemRouter = router({
   getPricingPlansFeature: protectedProcedure.query(async () => {
     const db = await getDb();
     if (!db) return { enabled: false as boolean };
-    const rows = await db.select({ enabled: appSettings.pricingPlansEnabled }).from(appSettings).limit(1);
-    return { enabled: !!rows[0]?.enabled };
+    try {
+      const rows = await db.select({ enabled: appSettings.pricingPlansEnabled }).from(appSettings).limit(1);
+      return { enabled: !!rows[0]?.enabled };
+    } catch (e) {
+      // Produção sem migração 0018 (coluna pricingPlansEnabled): não rebentar o layout inteiro.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("pricingPlansEnabled") || msg.includes("Unknown column")) {
+        console.warn("[getPricingPlansFeature] Coluna em falta na BD — aplicar migrações (drizzle-kit migrate).", msg);
+        return { enabled: false as boolean };
+      }
+      throw e;
+    }
   }),
 
   /** Aviso configurado na Super Admin para todos os utilizadores autenticados (UI omite Super Admin). */

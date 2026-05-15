@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import { SuperAdminPaymentsPanel } from "@/pages/super-admin/SuperAdminPaymentsPanel";
 import { toast } from "sonner";
 import {
+  BarChart3,
   AlertTriangle,
   Archive,
   BookOpen,
@@ -34,6 +35,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { BetaPurgeCountdown } from "@/components/BetaPurgeCountdown";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 
 function formatReleaseAt(iso: string) {
   try {
@@ -168,6 +170,10 @@ export default function SuperAdmin() {
   const isSuperOnly = !!(user as { isSuperAdmin?: boolean } | null)?.isSuperAdmin;
   const utils = trpc.useUtils();
   const settingsQuery = trpc.admin.getSettings.useQuery();
+  const apiUsageQuery = trpc.admin.getGlobalApiUsage.useQuery(undefined, {
+    enabled: isSuperOnly,
+    refetchInterval: 60_000,
+  });
   const releaseLogQuery = trpc.admin.getReleaseLog.useQuery();
   const betaAcceptedQuery = trpc.beta.listAccepted.useQuery(undefined, {
     enabled: isSuperOnly,
@@ -672,14 +678,119 @@ export default function SuperAdmin() {
           <TabsContent value="integrations" className="mt-6 space-y-6 outline-none">
         <Card className="border-0 shadow-sm">
           <CardHeader>
+            <CardTitle className="text-lg flex items-center gap-2">
+              <BarChart3 className="h-5 w-5 text-primary shrink-0" aria-hidden />
+              Uso global de API (Gemini e pesquisa web)
+            </CardTitle>
+            <p className="text-sm text-muted-foreground font-normal leading-relaxed">
+              Contagem <strong className="font-medium text-foreground">à escala de toda a instalação</strong> do CRM (não
+              por empresa nem por utilizador). Os limites gratuitos do Google variam por produto e data; usa as variáveis
+              de ambiente no servidor para alinhares alertas ao teu plano.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {apiUsageQuery.isLoading ? (
+              <p className="text-sm text-muted-foreground">A carregar estatísticas…</p>
+            ) : apiUsageQuery.isError ? (
+              <p className="text-sm text-destructive">Não foi possível carregar o uso de API.</p>
+            ) : apiUsageQuery.data ? (
+              <>
+                <div className="rounded-lg border bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-1">
+                  <div>
+                    Período:{" "}
+                    <span className="text-foreground font-medium">
+                      {apiUsageQuery.data.period === "month" ? "mensal" : "diário"}
+                    </span>{" "}
+                    · chave <code className="text-foreground/90">{apiUsageQuery.data.periodKey}</code> · fuso{" "}
+                    <code className="text-foreground/90">{apiUsageQuery.data.timezone}</code>
+                  </div>
+                  <div>
+                    Limite de referência Gemini:{" "}
+                    <code className="text-foreground/90">GEMINI_FREE_QUOTA</code> ={" "}
+                    {apiUsageQuery.data.geminiFreeQuota === 0 ? (
+                      <span className="text-foreground">0 (alertas desligados)</span>
+                    ) : (
+                      <span className="text-foreground">{apiUsageQuery.data.geminiFreeQuota} pedidos</span>
+                    )}{" "}
+                    · <code className="text-foreground/90">GEMINI_QUOTA_PERIOD</code> ={" "}
+                    <span className="text-foreground">{apiUsageQuery.data.period}</span>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-foreground">Pedidos Gemini (HTTP OK)</span>
+                    <span className="text-sm tabular-nums text-muted-foreground">
+                      {apiUsageQuery.data.gemini.requestCount}
+                      {apiUsageQuery.data.gemini.freeQuotaLimit > 0
+                        ? ` / ${apiUsageQuery.data.gemini.freeQuotaLimit}`
+                        : ""}
+                      {apiUsageQuery.data.gemini.percentUsed != null
+                        ? ` (${apiUsageQuery.data.gemini.percentUsed}%)`
+                        : ""}
+                    </span>
+                  </div>
+                  {apiUsageQuery.data.gemini.freeQuotaLimit > 0 ? (
+                    <Progress
+                      value={Math.min(
+                        100,
+                        (apiUsageQuery.data.gemini.requestCount /
+                          apiUsageQuery.data.gemini.freeQuotaLimit) *
+                          100,
+                      )}
+                    />
+                  ) : null}
+                  {apiUsageQuery.data.gemini.alertTriggeredThisPeriod ? (
+                    <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-950 dark:text-amber-100">
+                      <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" aria-hidden />
+                      <span>
+                        Já foi enviado o aviso aos Super Admins por atingir ≥90% do limite neste período (restavam ≤10%
+                        de pedidos).
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3">
+                  <div>
+                    <div className="text-sm font-medium text-foreground">Pesquisas web (Tavily)</div>
+                    <div className="text-xs text-muted-foreground">
+                      Um pedido por chamada bem-sucedida à API (com <code className="text-[11px]">TAVILY_API_KEY</code>).
+                    </div>
+                  </div>
+                  <Badge variant="secondary" className="tabular-nums">
+                    {apiUsageQuery.data.tavily.requestCount}
+                  </Badge>
+                </div>
+
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  O valor por defeito de <code className="text-[11px]">GEMINI_FREE_QUOTA</code> é 1500, alinhado à ordem de
+                  grandeza comum do plano gratuito do AI Studio (ex.: muitos milhares de pedidos/dia para modelos rápidos,
+                  sujeito a alteração pela Google). Ajusta o número e <code className="text-[11px]">GEMINI_QUOTA_PERIOD</code>{" "}
+                  (<code className="text-[11px]">day</code> ou <code className="text-[11px]">month</code>) ao que vês na
+                  consola Google. Opcional: <code className="text-[11px]">GEMINI_QUOTA_TIMEZONE</code> (por defeito{" "}
+                  <code className="text-[11px]">Europe/Lisbon</code>) para o início do dia/mês.
+                </p>
+              </>
+            ) : null}
+          </CardContent>
+        </Card>
+
+        <Card className="border-0 shadow-sm">
+          <CardHeader>
             <CardTitle className="text-lg">IA</CardTitle>
             <p className="text-sm text-muted-foreground font-normal leading-relaxed">
               Escolhe o <strong className="font-medium text-foreground">fornecedor preferido</strong> e preenche as chaves
               necessárias. Se o preferido falhar ou não tiver chave, o servidor tenta automaticamente os outros na ordem:
-              OpenAI → Gemini → DeepSeek → Claude (só os que têm chave configurada). Também podes usar variáveis de
-              ambiente no servidor: <code className="text-xs">OPENAI_API_KEY</code>,{" "}
-              <code className="text-xs">GEMINI_API_KEY</code>, <code className="text-xs">DEEPSEEK_API_KEY</code>,{" "}
-              <code className="text-xs">ANTHROPIC_API_KEY</code>.
+              OpenAI → Gemini → DeepSeek → Claude (só os que têm chave configurada).{" "}
+              <strong className="font-medium text-foreground">
+                As chaves que guardas aqui ficam na base de dados (campo encriptado), não são escritas no ficheiro{" "}
+                <code className="text-xs">.env</code>.
+              </strong>{" "}
+              Opcionalmente no servidor podes ainda definir{" "}
+              <code className="text-xs">OPENAI_API_KEY</code>, <code className="text-xs">GEMINI_API_KEY</code>,{" "}
+              <code className="text-xs">DEEPSEEK_API_KEY</code>, <code className="text-xs">ANTHROPIC_API_KEY</code>: se
+              existirem e tiverem formato válido, têm prioridade sobre o valor guardado na BD.
             </p>
           </CardHeader>
           <CardContent className="space-y-4">
