@@ -31,6 +31,8 @@ import {
   contactSubcontacts,
   crmNotifications,
   fidelizacoesTerminando,
+  motivosNaoFechamento,
+  calendarEventInvitees,
 } from "../drizzle/schema";
 import { alias } from "drizzle-orm/mysql-core";
 import {
@@ -67,6 +69,7 @@ import {
   whereUsersForUser,
   whereInTenantUserIds,
 } from "./tenantScope";
+import { buildContactsListConditions, canExportContacts } from "./contactListScope";
 import { storagePut } from "./storage";
 import {
   decryptText,
@@ -751,67 +754,120 @@ export const appRouter = router({
       .query(async ({ ctx, input }) => {
         const db = await getDb();
         if (!db) return [];
-        let query = db.select().from(contacts);
-        const conditions: any[] = [];
-
-        // Evitar que % ou _ na pesquisa quebrem o LIKE do MySQL; sem wildcards crus no valor
-        if (input?.search?.trim()) {
-          const cleaned = input.search.trim().replace(/[%_\\\\]/g, "");
-          if (cleaned.length > 0) {
-            conditions.push(
-              or(
-                and(sql`${contacts.name} IS NOT NULL`, like(contacts.name, `%${cleaned}%`)),
-                like(contacts.phone, `%${cleaned}%`),
-              ),
-            );
-          }
-        }
-        if (input?.status && input.status !== "todos") {
-          conditions.push(eq(contacts.status, input.status as any));
-        }
-
-        // Filtro por role + tenant (empresa)
         const user = ctx.user as any;
-        const tcond = whereContactsForUser(user);
-        if (tcond) conditions.push(tcond);
-
-        if (user?.crmRole === "vendedor") {
-          conditions.push(eq(contacts.assignedTo, user.id));
-          conditions.push(sqlVendedorBypassManualExclusive(contacts, user.id));
-        }
-
-        const utid = user?.tenantId as number | undefined;
-        if (user?.crmRole === "ce" && utid != null) {
-          conditions.push(
-            sql`NOT (
-              ${contacts.status} IN ('novo', 'em_contacto')
-              AND ${contacts.addedBy} IS NOT NULL
-              AND ${contacts.addedBy} = ${contacts.assignedTo}
-              AND ${contacts.addedBy} IN (
-                SELECT id FROM users WHERE crmRole IN ('vendedor', 'cej') AND tenantId = ${utid}
-              )
-            )`,
-          );
-        }
-        if (user?.crmRole === "cej" && utid != null) {
-          conditions.push(
-            sql`NOT (
-              ${contacts.status} IN ('novo', 'em_contacto')
-              AND ${contacts.addedBy} IS NOT NULL
-              AND ${contacts.addedBy} = ${contacts.assignedTo}
-              AND ${contacts.addedBy} <> ${user.id}
-              AND ${contacts.addedBy} IN (
-                SELECT id FROM users WHERE crmRole IN ('vendedor', 'cej') AND tenantId = ${utid}
-              )
-            )`,
-          );
-        }
-
+        const conditions = buildContactsListConditions(user, input);
+        let query = db.select().from(contacts);
         if (conditions.length > 0) {
           query = query.where(and(...conditions)) as any;
         }
-
         return await (query as any).orderBy(desc(contacts.createdAt)).limit(100);
+      }),
+
+    countByStatus: protectedProcedure
+      .input(z.object({ search: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return { total: 0, byStatus: {} as Record<string, number> };
+        const user = ctx.user as any;
+        const conditions = buildContactsListConditions(user, { search: input?.search });
+        const base =
+          conditions.length > 0
+            ? db.select({ status: contacts.status, c: count() }).from(contacts).where(and(...conditions))
+            : db.select({ status: contacts.status, c: count() }).from(contacts);
+        const rows = await (base as any).groupBy(contacts.status);
+        const byStatus: Record<string, number> = {};
+        let total = 0;
+        for (const r of rows as { status: string; c: number }[]) {
+          const n = Number(r.c) || 0;
+          byStatus[r.status] = n;
+          total += n;
+        }
+        return { total, byStatus };
+      }),
+
+    exportCsv: protectedProcedure
+      .input(z.object({ search: z.string().optional(), status: z.string().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        if (!canExportContacts(ctx.user)) {
+          throw new Error("Sem permissão para exportar contactos.");
+        }
+        const db = await getDb();
+        if (!db) return { csv: "", count: 0 };
+        const user = ctx.user as any;
+        const conditions = buildContactsListConditions(user, input);
+        let query = db
+          .select({
+            id: contacts.id,
+            phone: contacts.phone,
+            name: contacts.name,
+            email: contacts.email,
+            status: contacts.status,
+            origin: contacts.origin,
+            listName: contacts.listName,
+            importBatchLabel: contacts.importBatchLabel,
+            createdAt: contacts.createdAt,
+          })
+          .from(contacts);
+        if (conditions.length > 0) {
+          query = query.where(and(...conditions)) as any;
+        }
+        const rows = await (query as any).orderBy(desc(contacts.createdAt)).limit(10_000);
+        const esc = (v: unknown) => {
+          const s = v == null ? "" : String(v);
+          if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+          return s;
+        };
+        const header = [
+          "id",
+          "telefone",
+          "nome",
+          "email",
+          "estado",
+          "origem",
+          "lista",
+          "lote_importacao",
+          "criado_em",
+        ];
+        const lines = [
+          header.join(","),
+          ...rows.map((r: Record<string, unknown>) =>
+            [
+              r.id,
+              r.phone,
+              r.name,
+              r.email,
+              r.status,
+              r.origin,
+              r.listName,
+              r.importBatchLabel,
+              r.createdAt,
+            ]
+              .map(esc)
+              .join(","),
+          ),
+        ];
+        return { csv: "\uFEFF" + lines.join("\n"), count: rows.length };
+      }),
+
+    searchPicker: protectedProcedure
+      .input(z.object({ q: z.string().min(1).max(120) }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+        const conditions = buildContactsListConditions(user, { search: input.q });
+        let query = db
+          .select({
+            id: contacts.id,
+            phone: contacts.phone,
+            name: contacts.name,
+            status: contacts.status,
+          })
+          .from(contacts);
+        if (conditions.length > 0) {
+          query = query.where(and(...conditions)) as any;
+        }
+        return await (query as any).orderBy(desc(contacts.createdAt)).limit(20);
       }),
 
     add: protectedProcedure
@@ -891,6 +947,7 @@ export const appRouter = router({
         phones: z.array(z.string()),
         names: z.array(z.string()).optional(),
         listName: z.string().optional(),
+        importBatchLabel: z.string().max(255).optional(),
         assignTo: z.number().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -934,6 +991,11 @@ export const appRouter = router({
 
         const bulkStartedAt = new Date();
 
+        const batchLabel =
+          input.importBatchLabel?.trim() ||
+          input.listName?.trim() ||
+          null;
+
         const values = input.phones.map((phone, i) => ({
           phone,
           name: input.names?.[i] || null,
@@ -942,6 +1004,7 @@ export const appRouter = router({
           addedBy: user?.id,
           addedSource: "bulk" as const,
           listName: input.listName || null,
+          importBatchLabel: batchLabel,
           assignedTo: input.assignTo || null,
           lastAssignedAt: input.assignTo ? new Date() : null,
           tenantId: contactTenantId,
@@ -1073,6 +1136,7 @@ export const appRouter = router({
         notes: pendentes.notes,
         offerDesired: pendentes.offerDesired,
         status: pendentes.status,
+        motivoNaoFechamentoId: pendentes.motivoNaoFechamentoId,
         notified: pendentes.notified,
         priorityLevel: pendentes.priorityLevel,
         createdAt: pendentes.createdAt,
@@ -1122,13 +1186,97 @@ export const appRouter = router({
         return { success: true };
       }),
 
+    createWithContact: protectedProcedure
+      .input(
+        z.object({
+          phone: z.string().min(1),
+          name: z.string().optional(),
+          returnDate: z.string(),
+          notes: z.string().optional(),
+          offerDesired: z.string().optional(),
+          priorityLevel: z.number().int().min(1).max(5).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const phone = input.phone.replace(/\s+/g, "").trim();
+        if (!phone) throw new Error("Telefone obrigatório");
+
+        const contactTenantId = isSuperAdminUser(user) ? null : user.tenantId;
+        if (!isSuperAdminUser(user) && contactTenantId == null) {
+          throw new Error("Conta sem empresa (tenant).");
+        }
+
+        const manualAssign =
+          user?.crmRole === "vendedor" || user?.crmRole === "cej" ? user.id : null;
+        const contactCompanyId = isSuperAdminUser(user)
+          ? null
+          : user?.companyId != null
+            ? Number(user.companyId)
+            : null;
+
+        const phoneParts: SQL[] = [eq(contacts.phone, phone)];
+        const tPhone = whereContactsForUser(user);
+        if (tPhone) phoneParts.push(tPhone);
+        const [existing] = await db
+          .select({ id: contacts.id })
+          .from(contacts)
+          .where(and(...phoneParts))
+          .limit(1);
+
+        let contactId = existing?.id;
+        if (!contactId) {
+          await db.insert(contacts).values({
+            phone,
+            name: input.name?.trim() || null,
+            origin: "Telemarketing",
+            status: "novo",
+            addedBy: user?.id,
+            addedSource: "manual",
+            assignedTo: manualAssign,
+            lastAssignedAt: manualAssign ? new Date() : null,
+            tenantId: contactTenantId,
+            companyId: contactCompanyId,
+          } as any);
+          const [created] = await db
+            .select({ id: contacts.id })
+            .from(contacts)
+            .where(eq(contacts.phone, phone))
+            .orderBy(desc(contacts.id))
+            .limit(1);
+          contactId = created?.id;
+        }
+        if (!contactId) throw new Error("Falha ao criar contacto");
+
+        await assertContactAccessible(db, contactId, user);
+
+        await db.insert(pendentes).values({
+          contactId,
+          vendedorId: user?.id,
+          returnDate: new Date(input.returnDate),
+          notes: input.notes || null,
+          offerDesired: input.offerDesired || null,
+          status: "agendado",
+          priorityLevel: input.priorityLevel ?? 3,
+        });
+
+        await db.update(contacts).set({ status: "pendente" }).where(eq(contacts.id, contactId));
+
+        return { success: true, contactId };
+      }),
+
     update: protectedProcedure
       .input(z.object({
         id: z.number(),
         returnDate: z.string().optional(),
         notes: z.string().optional().nullable(),
         offerDesired: z.string().optional().nullable(),
-        status: z.enum(["agendado", "realizado", "expirado", "cancelado"]).optional(),
+        status: z
+          .enum(["agendado", "realizado", "expirado", "cancelado", "nao_fechou"])
+          .optional(),
+        motivoNaoFechamentoId: z.number().int().positive().nullable().optional(),
         priorityLevel: z.number().int().min(1).max(5).optional(),
       }))
       .mutation(async ({ ctx, input }) => {
@@ -1148,11 +1296,23 @@ export const appRouter = router({
           throw new Error("Só pode editar os seus pendentes");
         }
 
+        if (input.status === "nao_fechou" && !input.motivoNaoFechamentoId) {
+          throw new Error("Seleccione o motivo de não fechamento.");
+        }
+
         const payload: Record<string, unknown> = {};
         if (input.returnDate !== undefined) payload.returnDate = new Date(input.returnDate);
         if (input.notes !== undefined) payload.notes = input.notes;
         if (input.offerDesired !== undefined) payload.offerDesired = input.offerDesired;
-        if (input.status !== undefined) payload.status = input.status;
+        if (input.status !== undefined) {
+          payload.status = input.status;
+          if (input.status !== "nao_fechou") {
+            payload.motivoNaoFechamentoId = null;
+          }
+        }
+        if (input.motivoNaoFechamentoId !== undefined) {
+          payload.motivoNaoFechamentoId = input.motivoNaoFechamentoId;
+        }
         if (input.priorityLevel !== undefined) payload.priorityLevel = input.priorityLevel;
         if (Object.keys(payload).length === 0) return { success: true };
 
@@ -1166,6 +1326,15 @@ export const appRouter = router({
         });
         return { success: true };
       }),
+  }),
+
+  motivosNaoFechamento: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      if (!canSubmitCallFeedback(ctx.user)) return [];
+      return db.select().from(motivosNaoFechamento).orderBy(asc(motivosNaoFechamento.id));
+    }),
   }),
 
   // ============ CALENDAR ============
@@ -1258,7 +1427,10 @@ export const appRouter = router({
         const evtTid = isSuperAdminUser(user) ? null : user.tenantId;
         if (!isSuperAdminUser(user) && evtTid == null) throw new Error("Conta sem empresa.");
 
-        await db.insert(calendarEvents).values({
+        const companyId =
+          !isSuperAdminUser(user) && user?.companyId != null ? Number(user.companyId) : null;
+
+        const insertRes = await db.insert(calendarEvents).values({
           title: input.title,
           description: input.description || null,
           type: input.type,
@@ -1266,10 +1438,13 @@ export const appRouter = router({
           endAt,
           allDay: input.allDay,
           contactId: input.contactId ?? null,
-          assignedTo: input.assignedTo ?? null,
+          assignedTo: input.assignedTo ?? user?.id ?? null,
           createdBy: user?.id,
           tenantId: evtTid,
+          companyId,
         } as any);
+
+        const eventId = Number((insertRes as { insertId?: number })?.insertId ?? 0);
 
         await db.insert(auditLogs).values({
           userId: user?.id,
@@ -1278,7 +1453,7 @@ export const appRouter = router({
           details: `Criou evento: ${input.title}`,
         });
 
-        return { success: true };
+        return { success: true, eventId: eventId || undefined };
       }),
 
     update: protectedProcedure
@@ -1335,6 +1510,221 @@ export const appRouter = router({
 
         await db.delete(calendarEvents).where(eq(calendarEvents.id, input.id));
         return { success: true };
+      }),
+
+    todayAgenda: protectedProcedure
+      .input(z.object({ date: z.string().optional() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return { events: [], installations: [], preAgendamentos: [] };
+        const user = ctx.user as any;
+        const day = input.date ? new Date(input.date) : new Date();
+        const from = new Date(day);
+        from.setHours(0, 0, 0, 0);
+        const to = new Date(from);
+        to.setDate(to.getDate() + 1);
+
+        const baseRange = and(
+          sql`${calendarEvents.startAt} >= ${from}`,
+          sql`${calendarEvents.startAt} < ${to}`,
+        ) as SQL;
+
+        let events: (typeof calendarEvents.$inferSelect)[] = [];
+        if (user?.crmRole === "vendedor") {
+          events = await db
+            .select()
+            .from(calendarEvents)
+            .where(
+              and(
+                baseRange,
+                or(eq(calendarEvents.assignedTo, user.id), eq(calendarEvents.createdBy, user.id)),
+              ),
+            )
+            .orderBy(asc(calendarEvents.startAt));
+        } else if (["ce", "cej"].includes(user?.crmRole)) {
+          const teamIdsRaw = await getSellerIdsForPipelineScope(db, user);
+          if (teamIdsRaw !== "ALL" && teamIdsRaw.length) {
+            const coordRows = await db
+              .select({ id: users.id })
+              .from(users)
+              .where(and(eq(users.tenantId, user.tenantId as number), eq(users.crmRole, "coordenador")));
+            const coordIds = coordRows.map((c) => c.id);
+            const visibility: SQL[] = [
+              inArray(calendarEvents.assignedTo, teamIdsRaw),
+              inArray(calendarEvents.createdBy, teamIdsRaw),
+            ];
+            if (coordIds.length) {
+              visibility.push(
+                and(isNull(calendarEvents.assignedTo), inArray(calendarEvents.createdBy, coordIds)) as SQL,
+              );
+            }
+            events = await db
+              .select()
+              .from(calendarEvents)
+              .where(and(baseRange, or(...visibility)))
+              .orderBy(asc(calendarEvents.startAt));
+          }
+        } else {
+          const calParts: SQL[] = [baseRange];
+          if (!isSuperAdminUser(user) && user.tenantId != null) {
+            calParts.push(eq(calendarEvents.tenantId, user.tenantId));
+          }
+          events = await db
+            .select()
+            .from(calendarEvents)
+            .where(and(...calParts))
+            .orderBy(asc(calendarEvents.startAt));
+        }
+
+        const sellerIds = await getSellerIdsForPipelineScope(db, user);
+        const saleParts: SQL[] = [
+          sql`COALESCE(${sales.dataAtivacao}, ${sales.installationDate}) >= ${from}`,
+          sql`COALESCE(${sales.dataAtivacao}, ${sales.installationDate}) < ${to}`,
+        ];
+        const vcond = whereInTenantUserIds(sellerIds, sales.vendedorId);
+        if (vcond) saleParts.push(vcond);
+        const cten = whereContactsForUser(user);
+        if (cten) saleParts.push(cten);
+
+        const saleRows = await db
+          .select({
+            sale: sales,
+            contactName: contacts.name,
+            contactPhone: contacts.phone,
+          })
+          .from(sales)
+          .innerJoin(contacts, eq(sales.contactId, contacts.id))
+          .where(and(...saleParts))
+          .orderBy(asc(sales.installationDate))
+          .limit(100);
+
+        const installations = saleRows
+          .filter((r) => r.sale.installationDate)
+          .map((r) => ({ ...r.sale, contactName: r.contactName, contactPhone: r.contactPhone }));
+        const preAgendamentos = saleRows
+          .filter((r) => r.sale.preAgendamentoAt)
+          .map((r) => ({ ...r.sale, contactName: r.contactName, contactPhone: r.contactPhone }));
+
+        return { events, installations, preAgendamentos };
+      }),
+
+    listInvitees: protectedProcedure
+      .input(z.object({ eventId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const invUser = alias(users, "inv_user");
+        return db
+          .select({
+            id: calendarEventInvitees.id,
+            eventId: calendarEventInvitees.eventId,
+            userId: calendarEventInvitees.userId,
+            status: calendarEventInvitees.status,
+            userName: invUser.name,
+          })
+          .from(calendarEventInvitees)
+          .innerJoin(invUser, eq(calendarEventInvitees.userId, invUser.id))
+          .where(eq(calendarEventInvitees.eventId, input.eventId));
+      }),
+
+    setInvitees: protectedProcedure
+      .input(z.object({ eventId: z.number(), userIds: z.array(z.number().int().positive()) }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [evt] = await db.select().from(calendarEvents).where(eq(calendarEvents.id, input.eventId)).limit(1);
+        if (!evt) throw new Error("Evento não encontrado");
+        if (user?.crmRole === "vendedor" && evt.createdBy !== user.id) {
+          throw new Error("Sem permissão para convidar neste evento");
+        }
+        assertEntityTenant(evt as any, user, "Evento");
+
+        await db.delete(calendarEventInvitees).where(eq(calendarEventInvitees.eventId, input.eventId));
+        const unique = Array.from(new Set(input.userIds)).filter((id) => id !== user.id);
+        if (unique.length) {
+          await db.insert(calendarEventInvitees).values(
+            unique.map((userId) => ({
+              eventId: input.eventId,
+              userId,
+              status: "pending",
+            })),
+          );
+        }
+        return { success: true };
+      }),
+
+    respondInvite: protectedProcedure
+      .input(
+        z.object({
+          inviteId: z.number(),
+          status: z.enum(["accepted", "declined"]),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as any;
+        const [row] = await db
+          .select()
+          .from(calendarEventInvitees)
+          .where(
+            and(eq(calendarEventInvitees.id, input.inviteId), eq(calendarEventInvitees.userId, user.id)),
+          )
+          .limit(1);
+        if (!row) throw new Error("Convite não encontrado");
+        await db
+          .update(calendarEventInvitees)
+          .set({ status: input.status } as any)
+          .where(eq(calendarEventInvitees.id, input.inviteId));
+        return { success: true };
+      }),
+
+    myPendingInvites: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as any;
+      const invEvt = alias(calendarEvents, "inv_evt");
+      return db
+        .select({
+          inviteId: calendarEventInvitees.id,
+          status: calendarEventInvitees.status,
+          eventId: invEvt.id,
+          title: invEvt.title,
+          startAt: invEvt.startAt,
+          type: invEvt.type,
+        })
+        .from(calendarEventInvitees)
+        .innerJoin(invEvt, eq(calendarEventInvitees.eventId, invEvt.id))
+        .where(
+          and(eq(calendarEventInvitees.userId, user.id), eq(calendarEventInvitees.status, "pending")),
+        )
+        .orderBy(asc(invEvt.startAt))
+        .limit(50);
+    }),
+
+    searchUsersByName: protectedProcedure
+      .input(z.object({ q: z.string().min(1).max(80) }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as any;
+        const cleaned = input.q.trim().replace(/[%_\\\\]/g, "");
+        if (!cleaned) return [];
+        const parts: SQL[] = [
+          and(sql`${users.name} IS NOT NULL`, like(users.name, `%${cleaned}%`)) as SQL,
+        ];
+        const uwhere = whereUsersForUser(user);
+        if (uwhere) parts.push(uwhere);
+        if (!isSuperAdminUser(user) && user.tenantId != null) {
+          parts.push(eq(users.tenantId, user.tenantId));
+        }
+        return db
+          .select({ id: users.id, name: users.name })
+          .from(users)
+          .where(and(...parts))
+          .orderBy(users.name)
+          .limit(25);
       }),
   }),
 
@@ -3335,13 +3725,14 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
             createdTo: z.string().optional(),
             activatedFrom: z.string().optional(),
             activatedTo: z.string().optional(),
-            limit: z.number().int().min(1).max(500).optional(),
+            limit: z.number().int().min(1).max(100).optional(),
+            cursor: z.number().int().positive().optional(),
           })
           .optional(),
       )
       .query(async ({ ctx, input }) => {
         const db = await getDb();
-        if (!db) return [];
+        if (!db) return { items: [], nextCursor: null as number | null };
         const user = ctx.user as any;
         const ids = await getSellerIdsForPipelineScope(db, user);
         const parts: SQL[] = [];
@@ -3378,7 +3769,10 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
           }
         }
 
-        const lim = input?.limit != null ? Math.min(500, input.limit) : 300;
+        const lim = input?.limit != null ? Math.min(100, input.limit) : 50;
+        if (input?.cursor != null) {
+          parts.push(lt(sales.id, input.cursor));
+        }
         const saleVendedor = alias(users, "sale_vendedor");
         const rows = await db
           .select({
@@ -3391,14 +3785,19 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
           .innerJoin(contacts, eq(sales.contactId, contacts.id))
           .leftJoin(saleVendedor, eq(sales.vendedorId, saleVendedor.id))
           .where(and(...parts))
-          .orderBy(desc(sales.updatedAt))
-          .limit(lim);
-        return rows.map((r) => ({
+          .orderBy(desc(sales.id))
+          .limit(lim + 1);
+        const hasMore = rows.length > lim;
+        const page = hasMore ? rows.slice(0, lim) : rows;
+        const items = page.map((r) => ({
           ...r.sale,
           contactName: r.contactName,
           contactPhone: r.contactPhone,
           vendedorName: r.vendedorName ?? null,
         }));
+        const nextCursor =
+          hasMore && items.length > 0 ? items[items.length - 1]!.id : null;
+        return { items, nextCursor };
       }),
 
     create: protectedProcedure

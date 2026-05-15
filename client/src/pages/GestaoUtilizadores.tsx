@@ -5,7 +5,8 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Users, UserPlus } from "lucide-react";
+import { Users, UserPlus, Pencil, ShieldOff } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { useState } from "react";
 import { Redirect } from "wouter";
 import { trpc } from "@/lib/trpc";
@@ -21,6 +22,15 @@ export default function GestaoUtilizadores() {
     return <Redirect to="/painel" />;
   }
   const [showDialog, setShowDialog] = useState(false);
+  const [editUser, setEditUser] = useState<any>(null);
+  const [editForm, setEditForm] = useState({
+    name: "",
+    nif: "",
+    sfid: "",
+    bloqueado: false,
+    teamLeaderJuniorId: "" as string,
+    password: "",
+  });
   const [newUser, setNewUser] = useState({
     name: "",
     email: "",
@@ -32,6 +42,16 @@ export default function GestaoUtilizadores() {
   const usersQuery = trpc.authLocal.listUsers.useQuery();
   const coordinatorsQuery = trpc.authLocal.listCoordinators.useQuery(undefined, {
     enabled: isSuperAdmin,
+  });
+  const cejListQuery = trpc.authLocal.listCejForAssignment.useQuery();
+
+  const updateUserMutation = trpc.authLocal.updateUser.useMutation({
+    onSuccess: () => {
+      toast.success("Utilizador actualizado");
+      setEditUser(null);
+      usersQuery.refetch();
+    },
+    onError: (err: any) => toast.error(err.message),
   });
 
   const registerMutation = trpc.authLocal.register.useMutation({
@@ -103,6 +123,34 @@ export default function GestaoUtilizadores() {
     }
 
     registerMutation.mutate(base);
+  };
+
+  const openEdit = (u: any) => {
+    setEditUser(u);
+    setEditForm({
+      name: u.name || "",
+      nif: u.nif || "",
+      sfid: u.sfid || "",
+      bloqueado: !!u.bloqueado,
+      teamLeaderJuniorId: u.teamLeaderJuniorId ? String(u.teamLeaderJuniorId) : "",
+      password: "",
+    });
+  };
+
+  const saveEdit = () => {
+    if (!editUser) return;
+    updateUserMutation.mutate({
+      id: editUser.id,
+      name: editForm.name.trim(),
+      nif: editForm.nif.trim() || null,
+      sfid: editForm.sfid.trim() || null,
+      bloqueado: editForm.bloqueado,
+      teamLeaderJuniorId:
+        editUser.crmRole === "vendedor" && editForm.teamLeaderJuniorId
+          ? parseInt(editForm.teamLeaderJuniorId, 10)
+          : null,
+      password: editForm.password.length >= 6 ? editForm.password : undefined,
+    });
   };
 
   const disableSubmit =
@@ -249,8 +297,17 @@ export default function GestaoUtilizadores() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {u.bloqueado ? (
+                        <Badge variant="destructive" className="gap-1">
+                          <ShieldOff className="h-3 w-3" />
+                          Bloqueado
+                        </Badge>
+                      ) : null}
                       <Badge className={getRoleColor(u)}>{getDisplayRole(u)}</Badge>
                       <div className={`h-2 w-2 rounded-full ${u.isOnline ? "bg-green-500" : "bg-gray-300"}`} />
+                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(u)}>
+                        <Pencil className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -258,6 +315,78 @@ export default function GestaoUtilizadores() {
             )}
           </CardContent>
         </Card>
+
+        <Dialog open={!!editUser} onOpenChange={(o) => !o && setEditUser(null)}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Editar utilizador</DialogTitle>
+            </DialogHeader>
+            {editUser && (
+              <div className="space-y-4 pt-2">
+                <p className="text-sm text-muted-foreground">{editUser.email}</p>
+                <div className="space-y-2">
+                  <Label>Nome</Label>
+                  <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label>NIF</Label>
+                    <Input value={editForm.nif} onChange={(e) => setEditForm({ ...editForm, nif: e.target.value })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>SFID</Label>
+                    <Input value={editForm.sfid} onChange={(e) => setEditForm({ ...editForm, sfid: e.target.value })} />
+                  </div>
+                </div>
+                {editUser.crmRole === "vendedor" && (
+                  <div className="space-y-2">
+                    <Label>Chefe de Equipa Júnior (CEJ)</Label>
+                    <Select
+                      value={editForm.teamLeaderJuniorId || "none"}
+                      onValueChange={(v) =>
+                        setEditForm({ ...editForm, teamLeaderJuniorId: v === "none" ? "" : v })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Opcional" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Nenhum</SelectItem>
+                        {(cejListQuery.data ?? []).map((c) => (
+                          <SelectItem key={c.id} value={String(c.id)}>
+                            {c.name || `ID ${c.id}`}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div>
+                    <Label>Bloquear acesso</Label>
+                    <p className="text-xs text-muted-foreground">Impede login no CRM</p>
+                  </div>
+                  <Switch
+                    checked={editForm.bloqueado}
+                    onCheckedChange={(v) => setEditForm({ ...editForm, bloqueado: v })}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Nova senha (opcional)</Label>
+                  <Input
+                    type="password"
+                    placeholder="Mín. 6 caracteres"
+                    value={editForm.password}
+                    onChange={(e) => setEditForm({ ...editForm, password: e.target.value })}
+                  />
+                </div>
+                <Button className="w-full" onClick={saveEdit} disabled={updateUserMutation.isPending}>
+                  Guardar alterações
+                </Button>
+              </div>
+            )}
+          </DialogContent>
+        </Dialog>
       </div>
   );
 }

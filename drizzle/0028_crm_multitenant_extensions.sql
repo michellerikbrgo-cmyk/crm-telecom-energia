@@ -12,7 +12,7 @@ UPDATE `blacklist` b
   WHERE b.company_id IS NULL AND u.companyId IS NOT NULL;
 ALTER TABLE `blacklist` DROP INDEX `blacklist_phone_tenant`;
 CREATE INDEX `idx_blacklist_phone_company` ON `blacklist` (`phone`, `company_id`);
-CREATE INDEX `idx_blacklist_phone_tenant` ON `blacklist` (`phone`, `tenant_id`);
+CREATE INDEX `idx_blacklist_phone_tenant` ON `blacklist` (`phone`, `tenantId`);
 
 CREATE TABLE `motivos_nao_fechamento` (
   `id` int AUTO_INCREMENT NOT NULL,

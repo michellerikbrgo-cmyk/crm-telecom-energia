@@ -17,6 +17,7 @@ export default function BaseDados() {
   const [phoneCol, setPhoneCol] = useState("");
   const [nameCol, setNameCol] = useState("");
   const [listName, setListName] = useState("");
+  const [importBatchLabel, setImportBatchLabel] = useState("");
   const [assignTo, setAssignTo] = useState("");
   const [isUploading, setIsUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -30,6 +31,7 @@ export default function BaseDados() {
       setPhoneCol("");
       setNameCol("");
       setListName("");
+      setImportBatchLabel("");
       setIsUploading(false);
       setLocation("/discador");
     },
@@ -81,6 +83,7 @@ export default function BaseDados() {
       phones,
       names: names.length > 0 ? names : undefined,
       listName: listName || undefined,
+      importBatchLabel: importBatchLabel.trim() || listName.trim() || undefined,
       assignTo: assignTo ? parseInt(assignTo) : undefined,
     } as any);
   };
@@ -153,6 +156,17 @@ export default function BaseDados() {
                       value={listName}
                       onChange={(e) => setListName(e.target.value)}
                     />
+                  </div>
+                  <div className="space-y-2 md:col-span-2">
+                    <Label>Rótulo do lote (import_batch_label)</Label>
+                    <Input
+                      placeholder="Ex: CSV_2026-05-15_equipa_A"
+                      value={importBatchLabel}
+                      onChange={(e) => setImportBatchLabel(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Rastreabilidade na exportação de contactos; se vazio, usa o nome da lista.
+                    </p>
                   </div>
                   <div className="space-y-2">
                     <Label>Atribuir a Vendedor (ID, opcional)</Label>

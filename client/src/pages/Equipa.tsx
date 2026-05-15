@@ -32,6 +32,8 @@ export default function Equipa() {
     onError: (e) => toast.error(e instanceof Error ? e.message : "Erro ao criar equipa"),
   });
 
+  const canEditTeamEmail = isCoordLike || isSuperAdmin;
+
   const saveEmailMutation = trpc.teams.updateContactEmail.useMutation({
     onSuccess: () => {
       toast.success("E-mail da equipa guardado");
@@ -272,11 +274,11 @@ export default function Equipa() {
           <Card className="border-0 shadow-sm">
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
-                <Mail className="h-5 w-5 text-primary" />
-                E-mail da minha equipa
+                <Target className="h-5 w-5 text-primary" />
+                Meta da minha equipa
               </CardTitle>
               <p className="text-sm font-normal text-muted-foreground pt-1">
-                Só pode configurar o e-mail para a equipa a que está associado (teamId ou liderança na tabela de equipas). Perfil atual:{" "}
+                O e-mail oficial da equipa só o coordenador define. Perfil:{" "}
                 <Badge variant="outline">{roleBadge}</Badge>
               </p>
             </CardHeader>
@@ -293,31 +295,6 @@ export default function Equipa() {
                 <div className="space-y-3 max-w-xl">
                   <div className="text-sm font-medium">{mineTeam.name}</div>
                   <div className="space-y-2">
-                    <Label htmlFor="mine-team-email">E-mail oficial da equipa</Label>
-                    <div className="flex flex-wrap gap-2">
-                      <Input
-                        id="mine-team-email"
-                        type="email"
-                        placeholder="equipa@empresa.pt"
-                        value={mineEmail}
-                        onChange={(e) => setMineEmail(e.target.value)}
-                      />
-                      <Button
-                        type="button"
-                        disabled={saveEmailMutation.isPending}
-                        onClick={() => {
-                          const v = mineEmail.trim();
-                          saveEmailMutation.mutate({
-                            teamId: mineTeam.id,
-                            contactEmail: v === "" ? "" : v,
-                          });
-                        }}
-                      >
-                        Guardar
-                      </Button>
-                    </div>
-                  </div>
-                  <div className="space-y-2 border-t border-border/60 pt-4">
                     <Label htmlFor="mine-team-goal" className="flex items-center gap-2">
                       <Target className="h-4 w-4 text-muted-foreground" aria-hidden />
                       Meta diária de ligações

@@ -16,7 +16,8 @@
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "seed": "tsx scripts/seed-demo.ts",
     "purge:keep-beta-audit": "tsx scripts/purge-keep-beta-audit.ts",
-    "ensure-super-admin": "tsx scripts/ensure-super-admin.ts"
+    "ensure-super-admin": "tsx scripts/ensure-super-admin.ts",
+    "db:repair": "tsx scripts/repair-db-schema.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.693.0",

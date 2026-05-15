@@ -135,7 +135,34 @@ export default function Acompanhamento() {
   }, [filter, highlightContactId, createdFrom, createdTo, activatedFrom, activatedTo]);
 
   const utils = trpc.useUtils();
-  const pipelineQuery = trpc.sales.pipeline.useQuery(queryInput);
+  const [cursor, setCursor] = useState<number | undefined>(undefined);
+  const [allRows, setAllRows] = useState<PipelineRow[]>([]);
+
+  const pipelineQuery = trpc.sales.pipeline.useQuery(
+    { ...queryInput, limit: 50, cursor },
+  );
+
+  useEffect(() => {
+    setCursor(undefined);
+    setAllRows([]);
+  }, [filter, highlightContactId, createdFrom, createdTo, activatedFrom, activatedTo]);
+
+  useEffect(() => {
+    const page = pipelineQuery.data;
+    if (!page) return;
+    if (cursor == null) {
+      setAllRows(page.items as PipelineRow[]);
+    } else {
+      setAllRows((prev) => {
+        const ids = new Set(prev.map((r) => r.id));
+        const merged = [...prev];
+        for (const row of page.items as PipelineRow[]) {
+          if (!ids.has(row.id)) merged.push(row);
+        }
+        return merged;
+      });
+    }
+  }, [pipelineQuery.data, cursor]);
   const exportCsvMutation = trpc.sales.exportContractDossierCsv.useMutation({
     onError: (e: any) => toast.error(e?.message || "Erro ao exportar"),
   });
@@ -157,7 +184,8 @@ export default function Acompanhamento() {
     onError: (e: { message?: string }) => toast.error(e.message || "Erro"),
   });
 
-  const rows = (pipelineQuery.data ?? []) as PipelineRow[];
+  const rows = allRows;
+  const nextCursor = pipelineQuery.data?.nextCursor ?? null;
 
   useEffect(() => {
     if (!sheetSale) return;
@@ -377,6 +405,18 @@ export default function Acompanhamento() {
                   })}
                 </tbody>
               </table>
+            </div>
+          )}
+          {nextCursor != null && rows.length > 0 && (
+            <div className="p-4 border-t flex justify-center">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={pipelineQuery.isFetching}
+                onClick={() => setCursor(nextCursor)}
+              >
+                {pipelineQuery.isFetching ? "A carregar…" : "Carregar mais"}
+              </Button>
             </div>
           )}
         </CardContent>
