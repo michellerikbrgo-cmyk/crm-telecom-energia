@@ -7,7 +7,8 @@ import {
   callLogs,
   users,
 } from "../drizzle/schema";
-import { isSuperAdminUser, resolveUserTeamScopeId } from "./tenantScope";
+import { resolveBlacklistInsertScope } from "./blacklistScope";
+import { isSuperAdminUser } from "./tenantScope";
 import type { getDb } from "./db";
 
 export const FEEDBACK_DESTINATIONS = [
@@ -52,37 +53,6 @@ function optionalFidelDate(raw: string | null | undefined): Date | null {
   if (!s) return null;
   const d = new Date(s.includes("T") ? s : `${s}T12:00:00`);
   return Number.isNaN(d.getTime()) ? null : d;
-}
-
-async function blacklistTeamScopeForFeedback(
-  tx: Db,
-  user: {
-    id: number;
-    tenantId?: number | null;
-    companyId?: number | null;
-    crmRole?: string;
-    teamId?: number | null;
-    isSuperAdmin?: boolean;
-  },
-): Promise<{ tenantId: number | null; teamId: number | null; companyId: number | null }> {
-  if (isSuperAdminUser(user)) return { tenantId: null, teamId: null, companyId: null };
-  const tid = user.tenantId as number | null | undefined;
-  if (tid == null || tid === undefined) {
-    throw new Error("Conta sem empresa (coordenador); não é possível usar a lista negra.");
-  }
-  const companyId = user.companyId != null ? Number(user.companyId) : null;
-  if (user.crmRole === "coordenador") {
-    return { tenantId: tid, teamId: null, companyId };
-  }
-  const teamId = await resolveUserTeamScopeId(tx as any, {
-    id: user.id,
-    teamId: user.teamId ?? null,
-    crmRole: user.crmRole ?? "vendedor",
-  });
-  if (teamId == null) {
-    throw new Error("Associe o utilizador a uma equipa para usar a lista negra.");
-  }
-  return { tenantId: tid, teamId, companyId };
 }
 
 export async function executeSubmitAfterAnsweredCall(
@@ -200,7 +170,7 @@ export async function executeSubmitAfterAnsweredCall(
       case "lista_negra": {
         const phone = String(contact.phone || "").trim();
         if (!phone) throw new Error("Contacto sem telefone.");
-        const scope = await blacklistTeamScopeForFeedback(tx as any, user as any);
+        const scope = await resolveBlacklistInsertScope(tx as any, user as any);
         await tx.insert(blacklist).values({
           phone,
           tenantId: scope.tenantId,

@@ -25,6 +25,7 @@ import {
   SALE_CONTRACT_DOSSIER_HIDDEN_KEYS,
   SALE_CONTRACT_DOSSIER_SECTION_LABELS,
   dossierActivationCode,
+  dossierFieldDisplayLabel,
   formatDossierRegistoDate,
   parseSaleContractDossier,
   type SaleContractDossierFieldDef,
@@ -36,7 +37,8 @@ import {
   MOBILE_TECH_KEYS,
 } from "@shared/saleServices";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ClipboardList, FileDown, FileSpreadsheet, Printer } from "lucide-react";
+import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
+import { ClipboardList, FileDown, FileSpreadsheet, Printer, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useSearch } from "wouter";
@@ -87,7 +89,35 @@ type PipelineRow = {
   contactPhone?: string | null;
   vendedorName?: string | null;
   closedAt?: Date | string | null;
+  createdAt?: Date | string | null;
+  saleDetailJson?: string | null;
 };
+
+function parseSaleDetailJson(raw: string | null | undefined): { operadoraAtual?: string } {
+  if (!raw?.trim()) return {};
+  try {
+    return JSON.parse(raw) as { operadoraAtual?: string };
+  } catch {
+    return {};
+  }
+}
+
+function formatRegistoDate(row: PipelineRow): string {
+  if (row.closedAt) {
+    const dt = new Date(row.closedAt as unknown as string);
+    if (!Number.isNaN(dt.getTime())) {
+      return dt.toLocaleDateString("pt-PT", { dateStyle: "short" });
+    }
+  }
+  if (row.createdAt) {
+    const dt = new Date(row.createdAt as unknown as string);
+    if (!Number.isNaN(dt.getTime())) {
+      return dt.toLocaleDateString("pt-PT", { dateStyle: "short" });
+    }
+  }
+  const d = parseSaleContractDossier(row.saleContractDossier);
+  return formatDossierRegistoDate(d) || "—";
+}
 
 function isDossierFieldVisible(
   key: string,
@@ -136,7 +166,12 @@ const SECTION_ORDER: SaleContractDossierSection[] = [
 
 export default function Acompanhamento() {
   const { user } = useAuth();
-  const crmRole = (user as { crmRole?: string } | null)?.crmRole ?? "vendedor";
+  const authUser = user as { id?: number; name?: string; crmRole?: string } | null;
+  const authUserLabel = useMemo(() => {
+    if (!authUser?.id) return "—";
+    return authUser.name ? `${authUser.name} (#${authUser.id})` : `#${authUser.id}`;
+  }, [authUser?.id, authUser?.name]);
+  const crmRole = authUser?.crmRole ?? "vendedor";
   const canActivateService = ["vendedor", "cej", "ce", "coordenador"].includes(crmRole);
 
   const search = useSearch();
@@ -153,6 +188,8 @@ export default function Acompanhamento() {
   const [activatedFrom, setActivatedFrom] = useState("");
   const [activatedTo, setActivatedTo] = useState("");
   const [sheetSale, setSheetSale] = useState<PipelineRow | null>(null);
+  const [sheetContactName, setSheetContactName] = useState("");
+  const [sheetOperadora, setSheetOperadora] = useState("");
   const [form, setForm] = useState<Record<string, string>>({});
   const [services, setServices] = useState({
     titularTroca: false,
@@ -251,8 +288,29 @@ export default function Acompanhamento() {
   const rows = allRows;
   const nextCursor = pipelineQuery.data?.nextCursor ?? null;
 
+  const hasActiveFilters =
+    filter !== "__all" ||
+    createdFrom.trim() !== "" ||
+    createdTo.trim() !== "" ||
+    activatedFrom.trim() !== "" ||
+    activatedTo.trim() !== "";
+
+  const clearAllFilters = () => {
+    setFilter("__all");
+    setCreatedFrom("");
+    setCreatedTo("");
+    setActivatedFrom("");
+    setActivatedTo("");
+    setCursor(undefined);
+    setAllRows([]);
+    void utils.sales.pipeline.invalidate();
+  };
+
   useEffect(() => {
     if (!sheetSale) return;
+    setSheetContactName(sheetSale.contactName?.trim() || "");
+    const detail = parseSaleDetailJson(sheetSale.saleDetailJson);
+    setSheetOperadora(detail.operadoraAtual ?? "");
     const d = parseSaleContractDossier(sheetSale.saleContractDossier);
     const init: Record<string, string> = {};
     for (const f of SALE_CONTRACT_DOSSIER_FIELDS) {
@@ -290,7 +348,12 @@ export default function Acompanhamento() {
     for (const [k, v] of Object.entries(form)) {
       if (!SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(k)) patch[k] = v;
     }
-    saveDossier.mutate({ saleId: sheetSale.id, patch });
+    saveDossier.mutate({
+      saleId: sheetSale.id,
+      patch,
+      contactName: sheetContactName.trim() || undefined,
+      operadoraAtual: sheetOperadora || undefined,
+    });
   };
 
   const handleDownloadPdfs = async () => {
@@ -332,83 +395,113 @@ export default function Acompanhamento() {
         </p>
       </div>
 
-      <Card className="border-0 shadow-sm">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base font-medium">Filtrar por estado</CardTitle>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="gap-2"
-              disabled={exportCsvMutation.isPending}
-              onClick={async () => {
-                try {
-                  const status = filter === "__all" ? "__all" : filter;
-                  const data = await exportCsvMutation.mutateAsync({
-                    status: status as "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado" | "__all",
-                  });
-                  if (!data?.csv) throw new Error("Exportação vazia");
-                  const blob = new Blob([data.csv], { type: "text/csv;charset=utf-8" });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = data.filename || "acompanhamento.csv";
-                  document.body.appendChild(a);
-                  a.click();
-                  a.remove();
-                  URL.revokeObjectURL(url);
-                  toast.success("CSV exportado");
-                } catch (e: any) {
-                  toast.error(e?.message || "Erro ao exportar");
-                }
-              }}
-            >
-              <FileSpreadsheet className="h-4 w-4" />
-              Exportar CSV
-            </Button>
+      <Card className="border-0 shadow-sm overflow-hidden">
+        <div className="flex flex-wrap items-end gap-2 gap-y-3 border-b bg-muted/20 px-4 py-3">
+          <div className="flex min-w-[200px] flex-1 flex-col gap-1 sm:max-w-[280px]">
+            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Estado
+            </Label>
+            <Select value={filter} onValueChange={setFilter}>
+              <SelectTrigger className="h-9 bg-background">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {STATUS_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>
+                    {o.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-        </CardHeader>
-        <CardContent className="max-w-sm">
-          <Select value={filter} onValueChange={setFilter}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        <div className="grid gap-3 sm:grid-cols-2 mt-4 pt-4 border-t">
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">Criação desde</Label>
-            <Input type="date" value={createdFrom} onChange={(e) => setCreatedFrom(e.target.value)} />
+          <div className="flex flex-col gap-1">
+            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Criação
+            </Label>
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="date"
+                className="h-9 w-[132px] bg-background"
+                value={createdFrom}
+                onChange={(e) => setCreatedFrom(e.target.value)}
+              />
+              <span className="text-muted-foreground text-xs">—</span>
+              <Input
+                type="date"
+                className="h-9 w-[132px] bg-background"
+                value={createdTo}
+                onChange={(e) => setCreatedTo(e.target.value)}
+              />
+            </div>
           </div>
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">Criação até</Label>
-            <Input type="date" value={createdTo} onChange={(e) => setCreatedTo(e.target.value)} />
+          <div className="flex flex-col gap-1">
+            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Activação
+            </Label>
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="date"
+                className="h-9 w-[132px] bg-background"
+                value={activatedFrom}
+                onChange={(e) => setActivatedFrom(e.target.value)}
+              />
+              <span className="text-muted-foreground text-xs">—</span>
+              <Input
+                type="date"
+                className="h-9 w-[132px] bg-background"
+                value={activatedTo}
+                onChange={(e) => setActivatedTo(e.target.value)}
+              />
+            </div>
           </div>
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">Activação desde</Label>
-            <Input type="date" value={activatedFrom} onChange={(e) => setActivatedFrom(e.target.value)} />
-          </div>
-          <div className="space-y-1">
-            <Label className="text-xs text-muted-foreground">Activação até</Label>
-            <Input type="date" value={activatedTo} onChange={(e) => setActivatedTo(e.target.value)} />
-          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-9 gap-1.5 shrink-0"
+            disabled={!hasActiveFilters}
+            onClick={clearAllFilters}
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Limpar Filtros
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 gap-1.5 shrink-0 ml-auto"
+            disabled={exportCsvMutation.isPending}
+            onClick={async () => {
+              try {
+                const status = filter === "__all" ? "__all" : filter;
+                const data = await exportCsvMutation.mutateAsync({
+                  status: status as "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado" | "__all",
+                });
+                if (!data?.csv) throw new Error("Exportação vazia");
+                const blob = new Blob([data.csv], { type: "text/csv;charset=utf-8" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = data.filename || "acompanhamento.csv";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+                toast.success("CSV exportado");
+              } catch (e: any) {
+                toast.error(e?.message || "Erro ao exportar");
+              }
+            }}
+          >
+            <FileSpreadsheet className="h-4 w-4" />
+            Exportar CSV
+          </Button>
         </div>
         {highlightContactId != null ? (
-          <p className="text-xs text-muted-foreground mt-3 pt-2 border-t">
+          <p className="border-b px-4 py-2 text-xs text-muted-foreground bg-muted/10">
             A filtrar vendas do contacto <span className="font-mono text-foreground">#{highlightContactId}</span>.
           </p>
         ) : null}
-        </CardContent>
-      </Card>
-
-      <Card className="border-0 shadow-sm">
         <CardContent className="p-0">
           {pipelineQuery.isLoading ? (
             <div className="flex justify-center py-12">
@@ -422,12 +515,14 @@ export default function Acompanhamento() {
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-muted-foreground">
                     <th className="p-3 font-medium">Cliente</th>
+                    <th className="p-3 font-medium">Data de Registo</th>
                     <th className="p-3 font-medium">NIF</th>
+                    <th className="p-3 font-medium">ID da Venda</th>
                     <th className="p-3 font-medium">Acesso</th>
-                    <th className="p-3 font-medium">Estado (instalação)</th>
-                    <th className="p-3 font-medium">Estado do contrato</th>
-                    <th className="p-3 font-medium">Data instalação</th>
-                    <th className="p-3 font-medium">Hora instalação</th>
+                    <th className="p-3 font-medium">Estado (Instalação)</th>
+                    <th className="p-3 font-medium">Estado do Contrato</th>
+                    <th className="p-3 font-medium">Data de Instalação</th>
+                    <th className="p-3 font-medium">Hora da Instalação</th>
                     <th className="p-3 font-medium w-[150px]">Acções</th>
                   </tr>
                 </thead>
@@ -437,10 +532,9 @@ export default function Acompanhamento() {
                     const instValid = inst && !Number.isNaN(inst.getTime());
                     const dossier = parseSaleContractDossier(r.saleContractDossier);
                     const nif = String(dossier.contribuinte ?? "").trim();
-                    const acesso =
-                      dossierActivationCode(dossier) ||
-                      String(r.publicSaleId ?? "").trim() ||
-                      "—";
+                    const acesso = dossierActivationCode(dossier) || "—";
+                    const saleIdLabel = String(r.publicSaleId ?? "").trim() || "—";
+                    const registoLabel = formatRegistoDate(r);
                     const docLabel =
                       DOC_STATUS_LABEL[String(r.statusDocumentacao || "pendente")] ||
                       r.statusDocumentacao ||
@@ -459,7 +553,9 @@ export default function Acompanhamento() {
                           <div className="font-medium">{r.contactName || "—"}</div>
                           <div className="text-xs text-muted-foreground font-mono">{r.contactPhone || ""}</div>
                         </td>
+                        <td className="p-3 whitespace-nowrap text-muted-foreground">{registoLabel}</td>
                         <td className="p-3 font-mono text-xs">{nif || "—"}</td>
+                        <td className="p-3 font-mono text-xs">{saleIdLabel}</td>
                         <td className="p-3 font-mono text-xs">{acesso}</td>
                         <td className="p-3">{salePipelineStatusLabel(r.status)}</td>
                         <td className="p-3">{docLabel}</td>
@@ -570,29 +666,30 @@ export default function Acompanhamento() {
                           <div className="text-xs text-muted-foreground">Venda</div>
                           <div className="font-mono">#{sheetSale.id}</div>
                         </div>
-                        <div className="space-y-0.5 text-sm sm:col-span-2">
-                          <div className="text-xs text-muted-foreground">Contacto</div>
-                          <div>{sheetSale.contactName || "—"}</div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-xs text-muted-foreground">Nome do cliente</Label>
+                          <Input
+                            className="h-9"
+                            value={sheetContactName}
+                            onChange={(e) => setSheetContactName(e.target.value)}
+                            placeholder="Nome do cliente"
+                          />
                           {sheetSale.contactPhone ? (
-                            <div className="font-mono text-xs text-muted-foreground">{sheetSale.contactPhone}</div>
+                            <p className="font-mono text-xs text-muted-foreground pt-0.5">{sheetSale.contactPhone}</p>
                           ) : null}
+                        </div>
+                        <div className="space-y-1 sm:col-span-2">
+                          <Label className="text-xs text-muted-foreground">Operadora actual</Label>
+                          <OperadoraAtualSelect value={sheetOperadora} onValueChange={setSheetOperadora} />
                         </div>
                         <div className="space-y-0.5 text-sm sm:col-span-2">
                           <Label className="text-xs text-muted-foreground">Vendedor</Label>
-                          <Input
-                            readOnly
-                            className="h-9 bg-muted/50"
-                            value={
-                              sheetSale.vendedorName
-                                ? `${sheetSale.vendedorName} (#${sheetSale.vendedorId})`
-                                : `#${sheetSale.vendedorId}`
-                            }
-                          />
+                          <Input disabled className="h-9 bg-muted/50" value={authUserLabel} />
                         </div>
                         <div className="space-y-0.5 text-sm sm:col-span-2">
                           <Label className="text-xs text-muted-foreground">Data de registo / venda</Label>
                           <Input
-                            readOnly
+                            disabled
                             className="h-9 bg-muted/50"
                             value={(() => {
                               const d = parseSaleContractDossier(sheetSale.saleContractDossier);
@@ -604,7 +701,7 @@ export default function Acompanhamento() {
                                   return dt.toLocaleDateString("pt-PT", { dateStyle: "short" });
                                 }
                               }
-                              return "—";
+                              return new Date().toLocaleDateString("pt-PT", { dateStyle: "short" });
                             })()}
                           />
                         </div>
@@ -735,8 +832,8 @@ export default function Acompanhamento() {
                         <div className="grid grid-cols-1 gap-3">
                           {fields.map((f) => (
                             <div key={f.key} className="space-y-1.5">
-                              <Label htmlFor={f.key} className="text-xs font-normal text-muted-foreground">
-                                {f.label}
+                              <Label htmlFor={f.key} className="text-xs font-normal text-foreground">
+                                {dossierFieldDisplayLabel(f)}
                               </Label>
                               <Input
                                 id={f.key}

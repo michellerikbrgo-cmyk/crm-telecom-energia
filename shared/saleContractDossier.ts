@@ -74,6 +74,13 @@ export const SALE_CONTRACT_DOSSIER_FIELDS: readonly SaleContractDossierFieldDef[
 
 const ALLOWED_KEYS = new Set(SALE_CONTRACT_DOSSIER_FIELDS.map((f) => f.key));
 
+/** Rótulo UI — nunca expõe a chave técnica (ex. nome_cliente). */
+export function dossierFieldDisplayLabel(field: SaleContractDossierFieldDef): string {
+  const label = String(field.label ?? "").trim();
+  if (label) return label;
+  return field.key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export const SALE_CONTRACT_DOSSIER_SECTION_LABELS: Record<SaleContractDossierSection, string> = {
   cliente: "Cliente",
   morada: "Morada",
@@ -141,8 +148,9 @@ export function formatDossierRegistoDate(d: Record<string, string>): string {
 }
 
 /** Código de ativação preferencial para a grelha de acompanhamento. */
+/** Código de ativação (CVP) — nunca o ID da venda. */
 export function dossierActivationCode(d: Record<string, string>): string {
-  for (const k of ["cvp_1", "cvp_fx", "id_contrato", "cvp_2", "cvp_3", "cvp_4"]) {
+  for (const k of ["cvp_1", "cvp_fx", "cvp_2", "cvp_3", "cvp_4"]) {
     const v = String(d[k] ?? "").trim();
     if (v) return v;
   }

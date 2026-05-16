@@ -14,6 +14,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
 import { PriorityStars } from "@/components/PriorityStars";
 import { PhoneCall, Ban, AlertTriangle, Calendar, ClipboardList, Sparkles } from "lucide-react";
 import { trpc } from "@/lib/trpc";
@@ -25,7 +26,7 @@ import { Link } from "wouter";
 const FEEDBACK_DESTINATIONS = [
   { value: "nao_atende", label: "Não atende" },
   { value: "pendente", label: "Pendente" },
-  { value: "cliente_fidelizado", label: "Cliente fidelizado" },
+  { value: "cliente_fidelizado", label: "Cliente Fidelizado" },
   { value: "no_interest", label: "Sem interesse" },
   { value: "no_fiber_coverage", label: "Sem cobertura" },
   { value: "vodafone_client", label: "Cliente Vodafone" },
@@ -126,6 +127,8 @@ export default function Discador() {
 
   const [pendModalOpen, setPendModalOpen] = useState(false);
   const [pendForm, setPendForm] = useState({
+    contactName: "",
+    operadoraAtual: "",
     historicoChamada: "",
     returnDate: "",
     returnTime: "",
@@ -142,6 +145,8 @@ export default function Discador() {
 
   const [saleModalOpen, setSaleModalOpen] = useState(false);
   const [saleForm, setSaleForm] = useState({
+    contactName: "",
+    operadoraAtual: "",
     product: "telecom" as "telecom" | "energia",
     offer: "",
     value: "",
@@ -158,6 +163,8 @@ export default function Discador() {
     pendCloseOkRef.current = false;
     saleCloseOkRef.current = false;
     setPendForm({
+      contactName: contact.name?.trim() || "",
+      operadoraAtual: "",
       historicoChamada: "",
       returnDate: "",
       returnTime: "",
@@ -168,6 +175,8 @@ export default function Discador() {
       mode: "pendente",
     });
     setSaleForm({
+      contactName: contact.name?.trim() || "",
+      operadoraAtual: "",
       product: "telecom",
       offer: "",
       value: "",
@@ -217,6 +226,7 @@ export default function Discador() {
       pendCloseOkRef.current = false;
       setPendForm((f) => ({
         ...f,
+        contactName: contact.name?.trim() || f.contactName,
         historicoChamada: notes.trim() || "",
         notes: f.notes,
         mode: destination === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente",
@@ -227,6 +237,10 @@ export default function Discador() {
     }
     if (destination === "fechado_venda") {
       saleCloseOkRef.current = false;
+      setSaleForm((f) => ({
+        ...f,
+        contactName: contact.name?.trim() || f.contactName,
+      }));
       setSaleModalOpen(true);
       return;
     }
@@ -264,6 +278,8 @@ export default function Discador() {
     }
     createPendenteMutation.mutate({
       contactId: contact.id,
+      name: pendForm.contactName.trim() || undefined,
+      operadoraAtual: pendForm.operadoraAtual || undefined,
       returnDate: returnParsed.toISOString(),
       historicoChamada: pendForm.historicoChamada.trim(),
       notes: pendForm.notes.trim() || undefined,
@@ -280,6 +296,8 @@ export default function Discador() {
     if (!contact) return;
     createSaleMutation.mutate({
       contactId: contact.id,
+      name: saleForm.contactName.trim() || undefined,
+      operadoraAtual: saleForm.operadoraAtual || undefined,
       product: saleForm.product,
       offer: saleForm.offer.trim() || undefined,
       value: saleForm.value.trim() || undefined,
@@ -566,9 +584,22 @@ export default function Discador() {
                 <span className="text-muted-foreground">Tel.</span>{" "}
                 <span className="font-mono font-medium">{contact?.phone || "—"}</span>
               </div>
-              <div>
-                <span className="text-muted-foreground">Nome</span> {contact?.name || "—"}
-              </div>
+            </div>
+            <div className="space-y-1">
+              <Label>Nome do cliente</Label>
+              <Input
+                value={pendForm.contactName}
+                onChange={(e) => setPendForm((f) => ({ ...f, contactName: e.target.value }))}
+                className="h-9"
+                placeholder="Nome do cliente"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Operadora actual</Label>
+              <OperadoraAtualSelect
+                value={pendForm.operadoraAtual}
+                onValueChange={(v) => setPendForm((f) => ({ ...f, operadoraAtual: v }))}
+              />
             </div>
             <div className="space-y-1">
               <Label>Histórico / notas da chamada *</Label>
@@ -662,9 +693,22 @@ export default function Discador() {
                 <span className="text-muted-foreground">Tel.</span>{" "}
                 <span className="font-mono font-medium">{contact?.phone || "—"}</span>
               </div>
-              <div>
-                <span className="text-muted-foreground">Nome</span> {contact?.name || "—"}
-              </div>
+            </div>
+            <div className="space-y-1">
+              <Label>Nome do cliente</Label>
+              <Input
+                value={saleForm.contactName}
+                onChange={(e) => setSaleForm((f) => ({ ...f, contactName: e.target.value }))}
+                className="h-9"
+                placeholder="Nome do cliente"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label>Operadora actual</Label>
+              <OperadoraAtualSelect
+                value={saleForm.operadoraAtual}
+                onValueChange={(v) => setSaleForm((f) => ({ ...f, operadoraAtual: v }))}
+              />
             </div>
             <div className="space-y-1">
               <Label>Produto</Label>

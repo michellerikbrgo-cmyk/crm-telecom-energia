@@ -28,13 +28,15 @@ import {
 } from "@/components/ui/table";
 import { Clock, Plus, Pencil, Search, ShoppingCart } from "lucide-react";
 import type { inferRouterOutputs } from "@trpc/server";
-import { useMemo, useState } from "react";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { useEffect, useMemo, useState } from "react";
 import type { AppRouter } from "../../../server/routers";
 import { trpc } from "@/lib/trpc";
 
 type PendenteRow = inferRouterOutputs<AppRouter>["pendentes"]["list"][number];
 type ContactPickerRow = inferRouterOutputs<AppRouter>["contacts"]["searchPicker"][number];
 import { toast } from "sonner";
+import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
 import { PriorityStars, PriorityStarsDisplay } from "@/components/PriorityStars";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -46,7 +48,10 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 export default function Pendentes() {
+  const { user } = useAuth();
+  const authUserId = (user as { id?: number } | null)?.id;
   const utils = trpc.useUtils();
+  const operatorsQuery = trpc.pendentes.assignableOperators.useQuery();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [editPendente, setEditPendente] = useState<Record<string, unknown> | null>(null);
   const [filterPriority, setFilterPriority] = useState<string>("all");
@@ -86,6 +91,7 @@ export default function Pendentes() {
     notes: "",
     offerDesired: "",
     priorityLevel: "3",
+    assignVendedorId: "",
   });
 
   const [editForm, setEditForm] = useState({
@@ -157,10 +163,19 @@ export default function Pendentes() {
       notes: "",
       offerDesired: "",
       priorityLevel: "3",
+      assignVendedorId: authUserId != null ? String(authUserId) : "",
     });
     setContactSearch("");
     setSelectedContactId(null);
   };
+
+  useEffect(() => {
+    if (authUserId == null) return;
+    setNewPendente((p) => ({
+      ...p,
+      assignVendedorId: p.assignVendedorId || String(authUserId),
+    }));
+  }, [authUserId]);
 
   const handleCreate = () => {
     if (!newPendente.returnDate) {
@@ -171,6 +186,11 @@ export default function Pendentes() {
       toast.error("O histórico / notas da chamada é obrigatório.");
       return;
     }
+    const assignId = Number(newPendente.assignVendedorId);
+    if (!Number.isFinite(assignId) || assignId <= 0) {
+      toast.error("Seleccione o operador para o retorno.");
+      return;
+    }
     const base = {
       returnDate: newPendente.returnDate,
       historicoChamada: newPendente.historicoChamada.trim(),
@@ -179,6 +199,7 @@ export default function Pendentes() {
       priorityLevel: parseInt(newPendente.priorityLevel, 10),
       clientNif: newPendente.clientNif.trim() || undefined,
       operadoraAtual: newPendente.operadoraAtual.trim() || undefined,
+      assignVendedorId: assignId,
     };
     if (selectedContactId) {
       createPendenteMutation.mutate({
@@ -277,11 +298,11 @@ export default function Pendentes() {
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="space-y-2">
-                  <Label>Nome *</Label>
+                  <Label>Nome do cliente *</Label>
                   <Input
                     value={newPendente.name}
-                    disabled={!!selectedContactId}
                     onChange={(e) => setNewPendente({ ...newPendente, name: e.target.value })}
+                    placeholder="Nome do cliente"
                   />
                 </div>
                 <div className="space-y-2">
@@ -301,11 +322,9 @@ export default function Pendentes() {
                 </div>
                 <div className="space-y-2">
                   <Label>Operadora actual</Label>
-                  <Input
+                  <OperadoraAtualSelect
                     value={newPendente.operadoraAtual}
-                    onChange={(e) =>
-                      setNewPendente({ ...newPendente, operadoraAtual: e.target.value })
-                    }
+                    onValueChange={(v) => setNewPendente({ ...newPendente, operadoraAtual: v })}
                   />
                 </div>
               </div>
@@ -326,6 +345,24 @@ export default function Pendentes() {
                   value={newPendente.returnDate}
                   onChange={(e) => setNewPendente({ ...newPendente, returnDate: e.target.value })}
                 />
+              </div>
+              <div className="space-y-2">
+                <Label>Operador (retorno) *</Label>
+                <Select
+                  value={newPendente.assignVendedorId || undefined}
+                  onValueChange={(v) => setNewPendente({ ...newPendente, assignVendedorId: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Seleccionar operador" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(operatorsQuery.data ?? []).map((op) => (
+                      <SelectItem key={op.id} value={String(op.id)}>
+                        {op.name || `Utilizador #${op.id}`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <div className="space-y-2">
                 <Label>Prioridade</Label>

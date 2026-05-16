@@ -7,11 +7,13 @@ import {
   SALE_CONTRACT_DOSSIER_FIELDS,
   SALE_CONTRACT_DOSSIER_HIDDEN_KEYS,
 } from "@shared/saleContractDossier";
+import { normalizeOperadoraAtual, OPERADORA_ATUAL_OPTIONS } from "@shared/operadoraAtual";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router, superAdminProcedure } from "./_core/trpc";
 import { z } from "zod";
 import { authLocalRouter } from "./authLocal";
+import { resolveBlacklistInsertScope } from "./blacklistScope";
 import { getDb } from "./db";
 import {
   appSettings,
@@ -223,31 +225,37 @@ async function getSellerIdsForPipelineScope(
   return [];
 }
 
-async function blacklistTeamScopeForInsert(
-  db: NonNullable<Awaited<ReturnType<typeof getDb>>>,
-  user: any,
-): Promise<{ tenantId: number | null; teamId: number | null; companyId: number | null }> {
-  if (isSuperAdminUser(user)) return { tenantId: null, teamId: null, companyId: null };
-  const tid = user?.tenantId as number | null | undefined;
-  if (tid == null || tid === undefined) {
-    throw new Error("Conta sem empresa (coordenador); não é possível usar a lista negra.");
-  }
-  const companyId = user?.companyId != null ? Number(user.companyId) : null;
-  if (user.crmRole === "coordenador") {
-    return { tenantId: tid, teamId: null, companyId };
-  }
-  const teamId = await resolveUserTeamScopeId(db, {
-    id: user.id,
-    teamId: user.teamId ?? null,
-    crmRole: user.crmRole,
-  });
-  if (teamId == null) {
-    throw new Error("Associe o utilizador a uma equipa (teamId) para usar a lista negra.");
-  }
-  return { tenantId: tid, teamId, companyId };
-}
-
 const INSTALL_CAL_TITLE_PREFIX = "Instalação #";
+
+const operadoraAtualInputSchema = z
+  .string()
+  .max(64)
+  .optional()
+  .transform((v) => {
+    if (v == null || String(v).trim() === "") return undefined;
+    const n = normalizeOperadoraAtual(v);
+    if (!n) throw new Error(`Operadora inválida. Use: ${OPERADORA_ATUAL_OPTIONS.join(", ")}.`);
+    return n;
+  });
+
+function mergeSaleDetailJson(
+  existing: string | null | undefined,
+  patch: { operadoraAtual?: string },
+): string | null {
+  let base: Record<string, unknown> = {};
+  if (existing?.trim()) {
+    try {
+      base = JSON.parse(existing) as Record<string, unknown>;
+    } catch {
+      base = {};
+    }
+  }
+  if (patch.operadoraAtual !== undefined) {
+    if (patch.operadoraAtual) base.operadoraAtual = patch.operadoraAtual;
+    else delete base.operadoraAtual;
+  }
+  return Object.keys(base).length > 0 ? JSON.stringify(base) : null;
+}
 
 function canReviewBetaSuggestions(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
@@ -1204,7 +1212,7 @@ export const appRouter = router({
           priorityLevel: z.number().int().min(1).max(5).optional(),
           name: z.string().optional(),
           clientNif: z.string().max(32).optional(),
-          operadoraAtual: z.string().max(64).optional(),
+          operadoraAtual: operadoraAtualInputSchema,
           phone: z.string().optional(),
           finalizeDialer: z.boolean().optional(),
           assignVendedorId: z.number().int().positive().optional(),
@@ -1308,13 +1316,14 @@ export const appRouter = router({
           phone: z.string().min(1),
           name: z.string().optional(),
           clientNif: z.string().max(32).optional(),
-          operadoraAtual: z.string().max(64).optional(),
+          operadoraAtual: operadoraAtualInputSchema,
           returnDate: z.string(),
           historicoChamada: z.string().min(1, "Histórico / notas da chamada obrigatório."),
           notes: z.string().optional(),
           offerDesired: z.string().optional(),
           priorityLevel: z.number().int().min(1).max(5).optional(),
           finalizeDialer: z.boolean().optional(),
+          assignVendedorId: z.number().int().positive().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -1372,6 +1381,15 @@ export const appRouter = router({
 
         await assertContactAccessible(db, contactId, user);
 
+        const assigneeId = input.assignVendedorId ?? user?.id;
+        if (!assigneeId) throw new Error("Operador de retorno inválido.");
+        if (input.assignVendedorId != null && input.assignVendedorId !== user?.id) {
+          const sellerIds = await getPendenteVendedorIdsForUser(db, user);
+          if (sellerIds !== "ALL" && !sellerIds.includes(input.assignVendedorId)) {
+            throw new Error("Não pode atribuir o pendente a este operador.");
+          }
+        }
+
         const hist = input.historicoChamada.trim();
         let publicPendingId = "";
         if (input.clientNif?.trim()) {
@@ -1385,7 +1403,7 @@ export const appRouter = router({
           publicPendingId = await generateUniquePublicPendingId(tx);
           await tx.insert(pendentes).values({
             contactId,
-            vendedorId: user?.id,
+            vendedorId: assigneeId,
             criadorId: user?.id,
             returnDate: new Date(input.returnDate),
             notes: input.notes?.trim() || null,
@@ -3334,7 +3352,10 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         if (!db) throw new Error("Database not available");
         const user = ctx.user as any;
 
-        const { tenantId: tidIns, teamId: teamIns, companyId: companyIns } = await blacklistTeamScopeForInsert(db, user);
+        const { tenantId: tidIns, teamId: teamIns, companyId: companyIns } = await resolveBlacklistInsertScope(
+          db,
+          user,
+        );
 
         await db.insert(blacklist).values({
           phone: input.phone.trim(),
@@ -4140,6 +4161,8 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
           contractDossier: z.record(z.string(), z.string().max(4000)).optional(),
           finalizeDialer: z.boolean().optional(),
           dialerNotes: z.string().optional(),
+          name: z.string().max(255).optional(),
+          operadoraAtual: operadoraAtualInputSchema,
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -4167,8 +4190,18 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
             : null;
 
         const dialerObs = input.dialerNotes?.trim() || null;
+        const saleDetailJson = input.operadoraAtual
+          ? mergeSaleDetailJson(null, { operadoraAtual: input.operadoraAtual })
+          : null;
 
         await db.transaction(async (tx) => {
+          if (input.name?.trim()) {
+            await tx
+              .update(contacts)
+              .set({ name: input.name.trim() } as any)
+              .where(eq(contacts.id, input.contactId));
+          }
+
           const publicSaleId = await generateUniquePublicSaleId(tx as any);
           await tx.insert(sales).values({
             contactId: input.contactId,
@@ -4179,6 +4212,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
             installationDate: input.installationDate ? new Date(input.installationDate) : null,
             status: "aguarda_instalacao",
             saleContractDossier: dossierJson,
+            saleDetailJson,
             publicSaleId,
             createdAt: now,
             closedAt: now,
@@ -4330,6 +4364,8 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         z.object({
           saleId: z.number(),
           patch: z.record(z.string(), z.union([z.string().max(4000), z.literal(""), z.null()]).optional()),
+          contactName: z.string().max(255).optional(),
+          operadoraAtual: operadoraAtualInputSchema,
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -4339,6 +4375,22 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
         if (!s) throw new Error("Venda não encontrada");
         await assertSalePipelineAccessForSale(db, s, user);
+
+        if (input.contactName?.trim()) {
+          await db
+            .update(contacts)
+            .set({ name: input.contactName.trim() } as any)
+            .where(eq(contacts.id, s.contactId));
+        }
+
+        const salePatch: Record<string, unknown> = {};
+        if (input.operadoraAtual !== undefined) {
+          salePatch.saleDetailJson = mergeSaleDetailJson(
+            (s as { saleDetailJson?: string | null }).saleDetailJson ?? null,
+            { operadoraAtual: input.operadoraAtual },
+          );
+        }
+
         const filteredPatch: Record<string, string | null | undefined> = {};
         for (const [k, v] of Object.entries(input.patch)) {
           if (SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(k)) continue;
@@ -4350,7 +4402,10 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         );
         await db
           .update(sales)
-          .set({ saleContractDossier: nextJson } as any)
+          .set({
+            saleContractDossier: nextJson,
+            ...salePatch,
+          } as any)
           .where(eq(sales.id, input.saleId));
         await db.insert(auditLogs).values({
           userId: user?.id,
