@@ -163,6 +163,25 @@ async function main() {
     await pool.query("ALTER TABLE `users` ADD COLUMN `team_leader_junior_id` int NULL");
   }
 
+  console.log("[repair] contacts.status enum (legados + cliente_fidelizado)…");
+  await pool.query(
+    "UPDATE `contacts` SET `status` = 'pendente' WHERE `status` IN ('em_contacto', 'fidelizado', 'outros')",
+  );
+  await pool.query(`
+    ALTER TABLE \`contacts\`
+      MODIFY COLUMN \`status\` enum(
+        'novo',
+        'pendente',
+        'venda',
+        'nao_atende',
+        'sem_interesse',
+        'blacklist',
+        'sem_cobertura_fibra',
+        'cliente_fidelizado'
+      ) NOT NULL DEFAULT 'novo'
+  `);
+  console.log("  OK: contacts.status alinhado ao schema Drizzle");
+
   if (!(await columnExists(pool, "calendarEvents", "company_id"))) {
     await pool.query("ALTER TABLE `calendarEvents` ADD COLUMN `company_id` int NULL");
   }
