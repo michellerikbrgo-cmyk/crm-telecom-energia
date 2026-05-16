@@ -153,6 +153,7 @@ export const contacts = mysqlTable("contacts", {
     "sem_interesse",
     "blacklist",
     "sem_cobertura_fibra",
+    "cliente_fidelizado",
   ]).default("novo").notNull(),
   assignedTo: int("assignedTo"),
   lastAssignedAt: timestamp("lastAssignedAt"),

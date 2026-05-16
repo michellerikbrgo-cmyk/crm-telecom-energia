@@ -113,6 +113,14 @@ async function main() {
   if (!(await columnExists(pool, "pendentes", "motivo_nao_fechamento_id"))) {
     await pool.query("ALTER TABLE `pendentes` ADD COLUMN `motivo_nao_fechamento_id` int NULL");
   }
+  if (!(await columnExists(pool, "pendentes", "historico_chamada"))) {
+    await pool.query("ALTER TABLE `pendentes` ADD COLUMN `historico_chamada` text NULL");
+    console.log("  added pendentes.historico_chamada");
+  }
+  if (!(await columnExists(pool, "pendentes", "criador_id"))) {
+    await pool.query("ALTER TABLE `pendentes` ADD COLUMN `criador_id` int NULL");
+    console.log("  added pendentes.criador_id");
+  }
 
   console.log("[repair] Fase 3 — pendentes / sales (PEND-*, documentação)…");
   for (const [col, def] of [

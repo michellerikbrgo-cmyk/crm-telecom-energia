@@ -87,6 +87,7 @@ const STATUS_LABELS: Record<string, string> = {
   blacklist: "Blacklist",
   sem_cobertura_fibra: "Sem cobertura",
   vodafone_client: "Cliente Vodafone",
+  cliente_fidelizado: "Cliente fidelizado",
 };
 
 function formatCell(key: ContactExportColumnKey, row: ContactInventoryRow): string {

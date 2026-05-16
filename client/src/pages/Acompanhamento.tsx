@@ -22,7 +22,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { trpc } from "@/lib/trpc";
 import {
   SALE_CONTRACT_DOSSIER_FIELDS,
+  SALE_CONTRACT_DOSSIER_HIDDEN_KEYS,
   SALE_CONTRACT_DOSSIER_SECTION_LABELS,
+  dossierActivationCode,
+  formatDossierRegistoDate,
   parseSaleContractDossier,
   type SaleContractDossierFieldDef,
   type SaleContractDossierSection,
@@ -83,6 +86,7 @@ type PipelineRow = {
   contactName?: string | null;
   contactPhone?: string | null;
   vendedorName?: string | null;
+  closedAt?: Date | string | null;
 };
 
 function isDossierFieldVisible(
@@ -102,11 +106,20 @@ function isDossierFieldVisible(
 function groupFieldsBySection(): Map<SaleContractDossierSection, SaleContractDossierFieldDef[]> {
   const map = new Map<SaleContractDossierSection, SaleContractDossierFieldDef[]>();
   for (const f of SALE_CONTRACT_DOSSIER_FIELDS) {
+    if (SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(f.key)) continue;
     const arr = map.get(f.section) ?? [];
     arr.push(f);
     map.set(f.section, arr);
   }
   return map;
+}
+
+function fieldsForSection(section: SaleContractDossierSection): SaleContractDossierFieldDef[] {
+  const fields = FIELDS_BY_SECTION.get(section) ?? [];
+  if (section === "contrato") {
+    return fields.filter((f) => f.key === "id_contrato");
+  }
+  return fields;
 }
 
 const FIELDS_BY_SECTION = groupFieldsBySection();
@@ -243,6 +256,7 @@ export default function Acompanhamento() {
     const d = parseSaleContractDossier(sheetSale.saleContractDossier);
     const init: Record<string, string> = {};
     for (const f of SALE_CONTRACT_DOSSIER_FIELDS) {
+      if (SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(f.key)) continue;
       init[f.key] = d[f.key] ?? "";
     }
     setForm(init);
@@ -272,7 +286,11 @@ export default function Acompanhamento() {
       saleId: sheetSale.id,
       statusDocumentacao: services.statusDocumentacao as "pendente" | "enviado" | "assinado" | "back_office",
     });
-    saveDossier.mutate({ saleId: sheetSale.id, patch: form });
+    const patch: Record<string, string> = {};
+    for (const [k, v] of Object.entries(form)) {
+      if (!SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(k)) patch[k] = v;
+    }
+    saveDossier.mutate({ saleId: sheetSale.id, patch });
   };
 
   const handleDownloadPdfs = async () => {
@@ -404,7 +422,8 @@ export default function Acompanhamento() {
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-muted-foreground">
                     <th className="p-3 font-medium">Cliente</th>
-                    <th className="p-3 font-medium">Produto</th>
+                    <th className="p-3 font-medium">NIF</th>
+                    <th className="p-3 font-medium">Acesso</th>
                     <th className="p-3 font-medium">Estado (instalação)</th>
                     <th className="p-3 font-medium">Estado do contrato</th>
                     <th className="p-3 font-medium">Data instalação</th>
@@ -416,6 +435,12 @@ export default function Acompanhamento() {
                   {rows.map((r) => {
                     const inst = r.installationDate ? new Date(r.installationDate as unknown as string) : null;
                     const instValid = inst && !Number.isNaN(inst.getTime());
+                    const dossier = parseSaleContractDossier(r.saleContractDossier);
+                    const nif = String(dossier.contribuinte ?? "").trim();
+                    const acesso =
+                      dossierActivationCode(dossier) ||
+                      String(r.publicSaleId ?? "").trim() ||
+                      "—";
                     const docLabel =
                       DOC_STATUS_LABEL[String(r.statusDocumentacao || "pendente")] ||
                       r.statusDocumentacao ||
@@ -434,7 +459,8 @@ export default function Acompanhamento() {
                           <div className="font-medium">{r.contactName || "—"}</div>
                           <div className="text-xs text-muted-foreground font-mono">{r.contactPhone || ""}</div>
                         </td>
-                        <td className="p-3 capitalize">{r.product}</td>
+                        <td className="p-3 font-mono text-xs">{nif || "—"}</td>
+                        <td className="p-3 font-mono text-xs">{acesso}</td>
                         <td className="p-3">{salePipelineStatusLabel(r.status)}</td>
                         <td className="p-3">{docLabel}</td>
                         <td className="p-3 whitespace-nowrap text-muted-foreground">
@@ -537,7 +563,7 @@ export default function Acompanhamento() {
                     <>
                       <div className="grid gap-3 sm:grid-cols-2">
                         <div className="space-y-0.5 text-sm">
-                          <div className="text-xs text-muted-foreground">SALE_ID</div>
+                          <div className="text-xs text-muted-foreground">ID venda</div>
                           <div className="font-mono">{sheetSale.publicSaleId || "—"}</div>
                         </div>
                         <div className="space-y-0.5 text-sm">
@@ -551,14 +577,36 @@ export default function Acompanhamento() {
                             <div className="font-mono text-xs text-muted-foreground">{sheetSale.contactPhone}</div>
                           ) : null}
                         </div>
-                        <div className="space-y-0.5 text-sm">
-                          <div className="text-xs text-muted-foreground">Vendedor</div>
-                          <div>{sheetSale.vendedorName || "—"}</div>
-                          <div className="text-xs text-muted-foreground">#{sheetSale.vendedorId}</div>
+                        <div className="space-y-0.5 text-sm sm:col-span-2">
+                          <Label className="text-xs text-muted-foreground">Vendedor</Label>
+                          <Input
+                            readOnly
+                            className="h-9 bg-muted/50"
+                            value={
+                              sheetSale.vendedorName
+                                ? `${sheetSale.vendedorName} (#${sheetSale.vendedorId})`
+                                : `#${sheetSale.vendedorId}`
+                            }
+                          />
                         </div>
-                        <div className="space-y-0.5 text-sm">
-                          <div className="text-xs text-muted-foreground">Produto</div>
-                          <div className="capitalize">{sheetSale.product}</div>
+                        <div className="space-y-0.5 text-sm sm:col-span-2">
+                          <Label className="text-xs text-muted-foreground">Data de registo / venda</Label>
+                          <Input
+                            readOnly
+                            className="h-9 bg-muted/50"
+                            value={(() => {
+                              const d = parseSaleContractDossier(sheetSale.saleContractDossier);
+                              const fromDossier = formatDossierRegistoDate(d);
+                              if (fromDossier) return fromDossier;
+                              if (sheetSale.closedAt) {
+                                const dt = new Date(sheetSale.closedAt as unknown as string);
+                                if (!Number.isNaN(dt.getTime())) {
+                                  return dt.toLocaleDateString("pt-PT", { dateStyle: "short" });
+                                }
+                              }
+                              return "—";
+                            })()}
+                          />
                         </div>
                         <div className="space-y-0.5 text-sm">
                           <div className="text-xs text-muted-foreground">Estado (instalação)</div>
@@ -675,7 +723,7 @@ export default function Acompanhamento() {
               <ScrollArea className="h-[min(52vh,520px)] px-6">
                 <div className="space-y-8 py-4 pr-3">
                   {SECTION_ORDER.map((section) => {
-                    const fields = FIELDS_BY_SECTION.get(section)?.filter((f) =>
+                    const fields = fieldsForSection(section).filter((f) =>
                       isDossierFieldVisible(f.key, services),
                     );
                     if (!fields?.length) return null;

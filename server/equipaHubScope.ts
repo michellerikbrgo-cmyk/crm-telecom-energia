@@ -1,6 +1,6 @@
 import type { SQL } from "drizzle-orm";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { teams, users } from "../drizzle/schema";
+import { and, eq, inArray } from "drizzle-orm";
+import { users } from "../drizzle/schema";
 import { isSuperAdminUser, whereUsersForUser } from "./tenantScope";
 import type { getDb } from "./db";
 
@@ -61,24 +61,9 @@ export function buildEquipaMembersWhere(currentUser: Record<string, unknown>): S
   }
 
   if (role === "cej") {
-    /** CEJ: vendedores sob reporte directo, mesma equipa (teamId), equipas onde o CEJ é leaderId, ou mesma sub-empresa (companyId). */
+    /** CEJ: apenas vendedores com reporte directo (team_leader_junior_id = CEJ). */
     parts.push(eq(users.crmRole, "vendedor"));
-    const cejTeamId =
-      (currentUser as { teamId?: number | null }).teamId != null
-        ? Number((currentUser as { teamId?: number | null }).teamId)
-        : null;
-    const ledTeamCond = sql`EXISTS (
-      SELECT 1 FROM ${teams} t
-      WHERE t.id = ${users.teamId} AND t.leaderId = ${uid}
-    )` as SQL;
-    const companyMatch =
-      myCcid != null && !Number.isNaN(Number(myCcid)) ? eq(users.companyId, Number(myCcid)) : undefined;
-    const hierarchyParts: SQL[] = [eq(users.teamLeaderJuniorId, uid), ledTeamCond];
-    if (cejTeamId != null && !Number.isNaN(cejTeamId)) {
-      hierarchyParts.push(eq(users.teamId, cejTeamId));
-    }
-    if (companyMatch) hierarchyParts.push(companyMatch);
-    parts.push(or(...hierarchyParts)!);
+    parts.push(eq(users.teamLeaderJuniorId, uid));
     return parts;
   }
 
@@ -133,28 +118,8 @@ export async function assertCanManageEquipaMember(
     if (target.crmRole !== "vendedor") {
       throw new Error("CEJ só pode gerir vendedores da sua carteira.");
     }
-    const cejTeamId = (currentUser as { teamId?: number | null }).teamId;
-    const myCcid = (currentUser as { companyId?: number | null }).companyId;
-    const companyMatch =
-      myCcid != null &&
-      target.companyId != null &&
-      Number(target.companyId) === Number(myCcid);
-    const linkedByLeader = Number(target.teamLeaderJuniorId) === uid;
-    const linkedByTeam =
-      cejTeamId != null &&
-      target.teamId != null &&
-      Number(target.teamId) === Number(cejTeamId);
-    let linkedByLedTeam = false;
-    if (target.teamId != null) {
-      const [row] = await db
-        .select({ id: teams.id })
-        .from(teams)
-        .where(and(eq(teams.id, Number(target.teamId)), eq(teams.leaderId, uid)))
-        .limit(1);
-      linkedByLedTeam = !!row;
-    }
-    if (!linkedByLeader && !linkedByTeam && !linkedByLedTeam && !companyMatch) {
-      throw new Error("Este vendedor não está vinculado ao seu CEJ ou equipa.");
+    if (Number(target.teamLeaderJuniorId) !== uid) {
+      throw new Error("Este vendedor não reporta directamente a si (CEJ).");
     }
     return;
   }

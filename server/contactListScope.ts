@@ -10,6 +10,7 @@ export const CONTACT_STATUS_VALUES = [
   "sem_interesse",
   "blacklist",
   "sem_cobertura_fibra",
+  "cliente_fidelizado",
   "vodafone_client",
 ] as const;
 

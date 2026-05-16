@@ -45,18 +45,16 @@ export async function getPendenteVendedorIdsForUser(
   }
 
   if (role === "cej" && !Number.isNaN(tenantId)) {
-    const cejTeamId = user.teamId != null ? Number(user.teamId) : null;
-    const teamLink: SQL = cejTeamId
-      ? or(eq(users.teamLeaderJuniorId, uid), eq(users.teamId, cejTeamId))!
-      : eq(users.teamLeaderJuniorId, uid);
-
-    const parts: SQL[] = [eq(users.tenantId, tenantId), eq(users.crmRole, "vendedor"), teamLink];
-    if (companyId != null) parts.push(eq(users.companyId, companyId));
-
     const rows = await db
       .select({ id: users.id })
       .from(users)
-      .where(and(...parts));
+      .where(
+        and(
+          eq(users.tenantId, tenantId),
+          eq(users.crmRole, "vendedor"),
+          eq(users.teamLeaderJuniorId, uid),
+        ),
+      );
 
     const ids = rows.map((r) => r.id);
     if (!ids.includes(uid)) ids.push(uid);

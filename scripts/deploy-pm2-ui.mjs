@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Deploy iniciado pela UI Super Admin (processo separado — sobrevive ao pm2 restart).
+ * Deploy iniciado pela UI Super Admin (processo separado).
+ * Grava estado «success» ANTES do pm2 restart para o painel não ficar preso em «Em curso».
  */
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -36,7 +37,7 @@ async function main() {
   const prev = await readStatus();
   let output = "";
   try {
-    output = execSync("pnpm run deploy:pm2", {
+    output = execSync("pnpm run deploy:pm2:build", {
       cwd: ROOT,
       encoding: "utf8",
       env: {
@@ -47,6 +48,7 @@ async function main() {
       },
       maxBuffer: 32 * 1024 * 1024,
     });
+
     await writeStatus({
       state: "success",
       startedAt: prev.startedAt,
@@ -55,7 +57,30 @@ async function main() {
       startedByEmail: prev.startedByEmail,
       exitCode: 0,
       outputTail: tail(output),
-      message: "Deploy concluído com sucesso.",
+      message: "Build e migrações concluídos. A reiniciar PM2…",
+    });
+
+    const restart = spawnSync("pm2", ["restart", "crm"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      env: process.env,
+    });
+    const restartOut = [restart.stdout, restart.stderr].filter(Boolean).join("\n");
+    if (restart.status !== 0) {
+      await writeStatus({
+        state: "error",
+        finishedAt: new Date().toISOString(),
+        outputTail: tail(`${output}\n--- pm2 restart ---\n${restartOut}`),
+        message: `Build OK, mas pm2 restart falhou (código ${restart.status ?? 1}).`,
+        exitCode: restart.status ?? 1,
+      });
+      process.exit(1);
+    }
+
+    await writeStatus({
+      state: "success",
+      message: "Deploy concluído com sucesso (migrações, build, PM2).",
+      outputTail: tail(`${output}\n--- pm2 restart ---\n${restartOut}`),
     });
     console.log("[deploy-ui] OK");
   } catch (e) {

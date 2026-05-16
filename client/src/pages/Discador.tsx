@@ -25,6 +25,7 @@ import { Link } from "wouter";
 const FEEDBACK_DESTINATIONS = [
   { value: "nao_atende", label: "Não atende" },
   { value: "pendente", label: "Pendente" },
+  { value: "cliente_fidelizado", label: "Cliente fidelizado" },
   { value: "no_interest", label: "Sem interesse" },
   { value: "no_fiber_coverage", label: "Sem cobertura" },
   { value: "vodafone_client", label: "Cliente Vodafone" },
@@ -36,7 +37,9 @@ type Destination = (typeof FEEDBACK_DESTINATIONS)[number]["value"];
 
 export default function Discador() {
   const { user } = useAuth();
-  const crmRole = (user as { crmRole?: string } | null)?.crmRole ?? "vendedor";
+  const authUser = user as { id?: number; crmRole?: string } | null;
+  const authUserId = authUser?.id;
+  const crmRole = authUser?.crmRole ?? "vendedor";
   const canSubmitDialerFeedback = ["vendedor", "cej", "ce", "coordenador"].includes(crmRole);
 
   const statsQuery = trpc.dashboard.stats.useQuery(undefined, { refetchInterval: 120000 });
@@ -125,9 +128,16 @@ export default function Discador() {
   const [pendForm, setPendForm] = useState({
     historicoChamada: "",
     returnDate: "",
+    returnTime: "",
+    assignVendedorId: "" as string,
     priorityLevel: 3,
     notes: "",
     offerDesired: "",
+    mode: "pendente" as "pendente" | "cliente_fidelizado",
+  });
+
+  const operatorsQuery = trpc.pendentes.assignableOperators.useQuery(undefined, {
+    enabled: pendModalOpen,
   });
 
   const [saleModalOpen, setSaleModalOpen] = useState(false);
@@ -150,9 +160,12 @@ export default function Discador() {
     setPendForm({
       historicoChamada: "",
       returnDate: "",
+      returnTime: "",
+      assignVendedorId: authUserId != null ? String(authUserId) : "",
       priorityLevel: 3,
       notes: "",
       offerDesired: "",
+      mode: "pendente",
     });
     setSaleForm({
       product: "telecom",
@@ -160,7 +173,7 @@ export default function Discador() {
       value: "",
       installationDate: "",
     });
-  }, [contact?.id, canSubmitDialerFeedback]);
+  }, [contact?.id, canSubmitDialerFeedback, authUserId]);
 
   useEffect(() => {
     if (step === "after_call" && !canSubmitDialerFeedback) setStep("idle");
@@ -200,12 +213,14 @@ export default function Discador() {
 
   const submitFeedback = () => {
     if (!contact) return;
-    if (destination === "pendente") {
+    if (destination === "pendente" || destination === "cliente_fidelizado") {
       pendCloseOkRef.current = false;
       setPendForm((f) => ({
         ...f,
         historicoChamada: notes.trim() || "",
         notes: f.notes,
+        mode: destination === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente",
+        assignVendedorId: f.assignVendedorId || (authUserId != null ? String(authUserId) : ""),
       }));
       setPendModalOpen(true);
       return;
@@ -228,17 +243,35 @@ export default function Discador() {
       toast.error("Indique a data de retorno.");
       return;
     }
+    if (!pendForm.returnTime.trim()) {
+      toast.error("Indique a hora de retorno.");
+      return;
+    }
     if (!pendForm.historicoChamada.trim()) {
       toast.error("O histórico / notas da chamada é obrigatório.");
       return;
     }
+    const assignId = Number(pendForm.assignVendedorId);
+    if (!Number.isFinite(assignId) || assignId <= 0) {
+      toast.error("Seleccione o operador para o retorno.");
+      return;
+    }
+    const returnIso = `${pendForm.returnDate.trim()}T${pendForm.returnTime.trim()}`;
+    const returnParsed = new Date(returnIso);
+    if (Number.isNaN(returnParsed.getTime())) {
+      toast.error("Data ou hora de retorno inválida.");
+      return;
+    }
     createPendenteMutation.mutate({
       contactId: contact.id,
-      returnDate: pendForm.returnDate,
+      returnDate: returnParsed.toISOString(),
       historicoChamada: pendForm.historicoChamada.trim(),
       notes: pendForm.notes.trim() || undefined,
       offerDesired: pendForm.offerDesired.trim() || undefined,
       priorityLevel: pendForm.priorityLevel,
+      assignVendedorId: assignId,
+      contactStatusAfter:
+        pendForm.mode === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente",
       finalizeDialer: true,
     });
   };
@@ -479,6 +512,13 @@ export default function Discador() {
                     </p>
                   ) : null}
 
+                  {destination === "cliente_fidelizado" ? (
+                    <p className="text-xs text-muted-foreground rounded-md border border-dashed px-3 py-2">
+                      Ao submeter, abrimos o <strong>pendente de retorno</strong> para cliente fidelizado (data, hora e
+                      operador).
+                    </p>
+                  ) : null}
+
                   {destination === "fechado_venda" ? (
                     <p className="text-xs text-muted-foreground rounded-md border border-dashed px-3 py-2">
                       Ao submeter, abrimos a <strong>ficha de venda</strong> (produto, oferta e instalação).
@@ -516,7 +556,9 @@ export default function Discador() {
       <Dialog open={pendModalOpen} onOpenChange={onPendModalOpenChange}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Novo pendente</DialogTitle>
+            <DialogTitle>
+              {pendForm.mode === "cliente_fidelizado" ? "Cliente fidelizado — retorno" : "Novo pendente"}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 text-sm">
             <div className="rounded-md bg-muted/40 px-3 py-2 text-xs">
@@ -536,14 +578,43 @@ export default function Discador() {
                 className="min-h-[88px]"
               />
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label>Data de retorno *</Label>
+                <Input
+                  type="date"
+                  value={pendForm.returnDate}
+                  onChange={(e) => setPendForm((f) => ({ ...f, returnDate: e.target.value }))}
+                  className="h-9"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label>Hora *</Label>
+                <Input
+                  type="time"
+                  value={pendForm.returnTime}
+                  onChange={(e) => setPendForm((f) => ({ ...f, returnTime: e.target.value }))}
+                  className="h-9"
+                />
+              </div>
+            </div>
             <div className="space-y-1">
-              <Label>Data de retorno *</Label>
-              <Input
-                type="datetime-local"
-                value={pendForm.returnDate}
-                onChange={(e) => setPendForm((f) => ({ ...f, returnDate: e.target.value }))}
-                className="h-9"
-              />
+              <Label>Operador (retorno) *</Label>
+              <Select
+                value={pendForm.assignVendedorId || undefined}
+                onValueChange={(v) => setPendForm((f) => ({ ...f, assignVendedorId: v }))}
+              >
+                <SelectTrigger className="h-9">
+                  <SelectValue placeholder="Seleccionar operador" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(operatorsQuery.data ?? []).map((op) => (
+                    <SelectItem key={op.id} value={String(op.id)}>
+                      {op.name || `Utilizador #${op.id}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-1">
               <Label className="text-xs">Prioridade</Label>

@@ -1,6 +1,12 @@
 import { BETA_COMPLETED_RETENTION_DAYS, COOKIE_NAME } from "@shared/const";
 import { betaPurgeDeadlineMs } from "@shared/betaRetention";
-import { mergeSaleContractDossier, parseSaleContractDossier, SALE_CONTRACT_DOSSIER_FIELDS } from "@shared/saleContractDossier";
+import {
+  dossierRegistoPatchFromDate,
+  mergeSaleContractDossier,
+  parseSaleContractDossier,
+  SALE_CONTRACT_DOSSIER_FIELDS,
+  SALE_CONTRACT_DOSSIER_HIDDEN_KEYS,
+} from "@shared/saleContractDossier";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router, superAdminProcedure } from "./_core/trpc";
@@ -585,7 +591,7 @@ async function finalizeDialerSessionInTx(
   tx: any,
   user: { id: number },
   contactId: number,
-  destination: "pendente" | "fechado_venda",
+  destination: "pendente" | "fechado_venda" | "cliente_fidelizado",
   observacoes: string | null,
 ) {
   const [u] = await tx
@@ -1051,6 +1057,7 @@ export const appRouter = router({
             "sem_interesse",
             "blacklist",
             "sem_cobertura_fibra",
+            "cliente_fidelizado",
           ])
           .optional(),
       }))
@@ -1200,6 +1207,8 @@ export const appRouter = router({
           operadoraAtual: z.string().max(64).optional(),
           phone: z.string().optional(),
           finalizeDialer: z.boolean().optional(),
+          assignVendedorId: z.number().int().positive().optional(),
+          contactStatusAfter: z.enum(["pendente", "cliente_fidelizado"]).optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -1209,6 +1218,16 @@ export const appRouter = router({
 
         await assertContactAccessible(db, input.contactId, user);
 
+        const assigneeId = input.assignVendedorId ?? user?.id;
+        if (!assigneeId) throw new Error("Operador de retorno inválido.");
+
+        if (input.assignVendedorId != null && input.assignVendedorId !== user?.id) {
+          const sellerIds = await getPendenteVendedorIdsForUser(db, user);
+          if (sellerIds !== "ALL" && !sellerIds.includes(input.assignVendedorId)) {
+            throw new Error("Não pode atribuir o pendente a este operador.");
+          }
+        }
+
         if (input.name?.trim() || input.phone?.trim()) {
           const patch: Record<string, unknown> = {};
           if (input.name?.trim()) patch.name = input.name.trim();
@@ -1217,12 +1236,17 @@ export const appRouter = router({
         }
 
         const hist = input.historicoChamada.trim();
+        const nextContactStatus =
+          input.contactStatusAfter === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente";
+        const dialerDest =
+          nextContactStatus === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente";
+
         let publicPendingId = "";
         await db.transaction(async (tx) => {
           publicPendingId = await generateUniquePublicPendingId(tx);
           await tx.insert(pendentes).values({
             contactId: input.contactId,
-            vendedorId: user?.id,
+            vendedorId: assigneeId,
             criadorId: user?.id,
             returnDate: new Date(input.returnDate),
             notes: input.notes?.trim() || null,
@@ -1235,15 +1259,48 @@ export const appRouter = router({
             historicoChamada: hist,
           } as any);
 
-          await tx.update(contacts).set({ status: "pendente" }).where(eq(contacts.id, input.contactId));
+          await tx
+            .update(contacts)
+            .set({ status: nextContactStatus })
+            .where(eq(contacts.id, input.contactId));
 
           if (input.finalizeDialer) {
-            await finalizeDialerSessionInTx(tx, user, input.contactId, "pendente", input.notes?.trim() || hist);
+            await finalizeDialerSessionInTx(tx, user, input.contactId, dialerDest, input.notes?.trim() || hist);
           }
         });
 
         return { success: true, publicPendingId };
       }),
+
+    assignableOperators: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return [];
+      const user = ctx.user as Record<string, unknown>;
+      const sellerIds = await getPendenteVendedorIdsForUser(db, user);
+      if (sellerIds === "ALL") {
+        const rows = await db
+          .select({ id: users.id, name: users.name, crmRole: users.crmRole })
+          .from(users)
+          .where(eq(users.crmRole, "vendedor"))
+          .orderBy(users.name);
+        return rows;
+      }
+      if (!sellerIds.length) {
+        const uid = Number(user.id);
+        if (!uid) return [];
+        const [self] = await db
+          .select({ id: users.id, name: users.name, crmRole: users.crmRole })
+          .from(users)
+          .where(eq(users.id, uid))
+          .limit(1);
+        return self ? [self] : [];
+      }
+      return await db
+        .select({ id: users.id, name: users.name, crmRole: users.crmRole })
+        .from(users)
+        .where(inArray(users.id, sellerIds))
+        .orderBy(users.name);
+    }),
 
     createWithContact: protectedProcedure
       .input(
@@ -1372,13 +1429,19 @@ export const appRouter = router({
 
         const publicSaleId = await generateUniquePublicSaleId(db);
         const now = new Date();
+        const sellerName = String(user?.name ?? "").trim();
+        const dossierJson = mergeSaleContractDossier(null, {
+          ...dossierRegistoPatchFromDate(now),
+          ...(sellerName ? { vendedor_sfid: sellerName } : {}),
+        });
         await db.insert(sales).values({
           contactId: p.contactId,
-          vendedorId: p.vendedorId,
+          vendedorId: user?.id,
           product: input.product,
           status: "aguarda_instalacao",
           publicSaleId,
           offer: p.offerDesired,
+          saleContractDossier: dossierJson,
           createdAt: now,
           closedAt: now,
         } as any);
@@ -4086,16 +4149,24 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
 
         await assertContactAccessible(db, input.contactId, user);
 
+        const now = new Date();
+        const sellerName = String(user?.name ?? "").trim();
+        const registoPatch = dossierRegistoPatchFromDate(now);
+        const dossierBase: Record<string, string | null | undefined> = {
+          ...registoPatch,
+          ...(sellerName ? { vendedor_sfid: sellerName } : {}),
+        };
+        if (input.contractDossier) {
+          for (const [k, v] of Object.entries(input.contractDossier)) {
+            if (!SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(k)) dossierBase[k] = v;
+          }
+        }
         const dossierJson =
-          input.contractDossier && Object.keys(input.contractDossier).length > 0
-            ? mergeSaleContractDossier(
-                null,
-                input.contractDossier as Record<string, string | null | undefined>,
-              )
+          Object.keys(dossierBase).length > 0
+            ? mergeSaleContractDossier(null, dossierBase)
             : null;
 
         const dialerObs = input.dialerNotes?.trim() || null;
-        const now = new Date();
 
         await db.transaction(async (tx) => {
           const publicSaleId = await generateUniquePublicSaleId(tx as any);
@@ -4268,9 +4339,14 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
         if (!s) throw new Error("Venda não encontrada");
         await assertSalePipelineAccessForSale(db, s, user);
+        const filteredPatch: Record<string, string | null | undefined> = {};
+        for (const [k, v] of Object.entries(input.patch)) {
+          if (SALE_CONTRACT_DOSSIER_HIDDEN_KEYS.has(k)) continue;
+          filteredPatch[k] = v;
+        }
         const nextJson = mergeSaleContractDossier(
           (s as { saleContractDossier?: string | null }).saleContractDossier ?? null,
-          input.patch as Record<string, string | null | undefined>,
+          filteredPatch,
         );
         await db
           .update(sales)

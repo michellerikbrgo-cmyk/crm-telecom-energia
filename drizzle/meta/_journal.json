@@ -225,6 +225,13 @@
       "when": 1778250023000,
       "tag": "0031_pendentes_criador_idempotent_columns",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "5",
+      "when": 1778250024000,
+      "tag": "0032_cliente_fidelizado_status",
+      "breakpoints": true
     }
   ]
 }
