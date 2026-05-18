@@ -128,6 +128,7 @@ export default function Discador() {
   const [pendModalOpen, setPendModalOpen] = useState(false);
   const [pendForm, setPendForm] = useState({
     contactName: "",
+    contactPhone: "",
     operadoraAtual: "",
     historicoChamada: "",
     returnDate: "",
@@ -164,6 +165,7 @@ export default function Discador() {
     saleCloseOkRef.current = false;
     setPendForm({
       contactName: contact.name?.trim() || "",
+      contactPhone: contact.phone?.trim() || "",
       operadoraAtual: "",
       historicoChamada: "",
       returnDate: "",
@@ -227,6 +229,7 @@ export default function Discador() {
       setPendForm((f) => ({
         ...f,
         contactName: contact.name?.trim() || f.contactName,
+        contactPhone: contact.phone?.trim() || f.contactPhone,
         historicoChamada: notes.trim() || "",
         notes: f.notes,
         mode: destination === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente",
@@ -279,6 +282,7 @@ export default function Discador() {
     createPendenteMutation.mutate({
       contactId: contact.id,
       name: pendForm.contactName.trim() || undefined,
+      phone: pendForm.contactPhone.trim() || undefined,
       operadoraAtual: pendForm.operadoraAtual || undefined,
       returnDate: returnParsed.toISOString(),
       historicoChamada: pendForm.historicoChamada.trim(),
@@ -579,11 +583,14 @@ export default function Discador() {
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 text-sm">
-            <div className="rounded-md bg-muted/40 px-3 py-2 text-xs">
-              <div>
-                <span className="text-muted-foreground">Tel.</span>{" "}
-                <span className="font-mono font-medium">{contact?.phone || "—"}</span>
-              </div>
+            <div className="space-y-1">
+              <Label>Contacto (telefone)</Label>
+              <Input
+                value={pendForm.contactPhone}
+                onChange={(e) => setPendForm((f) => ({ ...f, contactPhone: e.target.value }))}
+                className="h-9 font-mono"
+                placeholder="9xxxxxxxx"
+              />
             </div>
             <div className="space-y-1">
               <Label>Nome do cliente</Label>

@@ -107,7 +107,7 @@ async function main() {
   await execIgnoreDup(
     pool,
     `ALTER TABLE \`pendentes\` MODIFY COLUMN \`status\` enum(
-      'agendado','realizado','expirado','cancelado','nao_fechou'
+      'agendado','realizado','expirado','cancelado','nao_fechou','fidelizado'
     ) NOT NULL DEFAULT 'agendado'`,
   );
   if (!(await columnExists(pool, "pendentes", "motivo_nao_fechamento_id"))) {
@@ -161,6 +161,24 @@ async function main() {
   }
   if (!(await columnExists(pool, "users", "team_leader_junior_id"))) {
     await pool.query("ALTER TABLE `users` ADD COLUMN `team_leader_junior_id` int NULL");
+  }
+
+  if (!(await tableExists(pool, "sale_attachments"))) {
+    await pool.query(`
+      CREATE TABLE \`sale_attachments\` (
+        \`id\` int AUTO_INCREMENT NOT NULL,
+        \`sale_id\` int NOT NULL,
+        \`storage_key\` varchar(512) NOT NULL,
+        \`original_name\` varchar(255) NOT NULL,
+        \`mime_type\` varchar(128) NOT NULL,
+        \`size_bytes\` int NOT NULL,
+        \`uploaded_by\` int NOT NULL,
+        \`created_at\` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT \`sale_attachments_id\` PRIMARY KEY(\`id\`),
+        INDEX \`sale_attachments_sale_id_idx\` (\`sale_id\`)
+      )
+    `);
+    console.log("  OK: sale_attachments");
   }
 
   console.log("[repair] contacts.status enum (legados + cliente_fidelizado)…");

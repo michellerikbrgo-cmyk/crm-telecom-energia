@@ -38,7 +38,9 @@ import {
 } from "@shared/saleServices";
 import { Checkbox } from "@/components/ui/checkbox";
 import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
-import { ClipboardList, FileDown, FileSpreadsheet, Printer, RotateCcw } from "lucide-react";
+import { ColumnHeaderFilter, type ColumnSort } from "@/components/ColumnHeaderFilter";
+import { SaleAttachmentsPanel } from "@/components/SaleAttachmentsPanel";
+import { ClipboardList, FileDown, FileSpreadsheet, Printer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useSearch } from "wouter";
@@ -183,10 +185,14 @@ export default function Acompanhamento() {
   }, [search]);
 
   const [filter, setFilter] = useState<string>("__all");
-  const [createdFrom, setCreatedFrom] = useState("");
-  const [createdTo, setCreatedTo] = useState("");
-  const [activatedFrom, setActivatedFrom] = useState("");
-  const [activatedTo, setActivatedTo] = useState("");
+  const [colCliente, setColCliente] = useState("");
+  const [colContacto, setColContacto] = useState("");
+  const [colNif, setColNif] = useState("");
+  const [colSaleId, setColSaleId] = useState("");
+  const [colContrato, setColContrato] = useState("");
+  const [sortCliente, setSortCliente] = useState<ColumnSort>(null);
+  const [debitoDireto, setDebitoDireto] = useState(false);
+  const [cartoesMoveis, setCartoesMoveis] = useState(0);
   const [sheetSale, setSheetSale] = useState<PipelineRow | null>(null);
   const [sheetContactName, setSheetContactName] = useState("");
   const [sheetOperadora, setSheetOperadora] = useState("");
@@ -216,12 +222,8 @@ export default function Acompanhamento() {
     if (highlightContactId != null) {
       out.contactId = highlightContactId;
     }
-    if (createdFrom.trim()) out.createdFrom = createdFrom.trim();
-    if (createdTo.trim()) out.createdTo = createdTo.trim();
-    if (activatedFrom.trim()) out.activatedFrom = activatedFrom.trim();
-    if (activatedTo.trim()) out.activatedTo = activatedTo.trim();
     return Object.keys(out).length > 0 ? out : undefined;
-  }, [filter, highlightContactId, createdFrom, createdTo, activatedFrom, activatedTo]);
+  }, [filter, highlightContactId]);
 
   const utils = trpc.useUtils();
   const [cursor, setCursor] = useState<number | undefined>(undefined);
@@ -234,7 +236,7 @@ export default function Acompanhamento() {
   useEffect(() => {
     setCursor(undefined);
     setAllRows([]);
-  }, [filter, highlightContactId, createdFrom, createdTo, activatedFrom, activatedTo]);
+  }, [filter, highlightContactId]);
 
   useEffect(() => {
     const page = pipelineQuery.data;
@@ -285,32 +287,51 @@ export default function Acompanhamento() {
     onError: (e: { message?: string }) => toast.error(e.message || "Erro"),
   });
 
-  const rows = allRows;
+  const rows = useMemo(() => {
+    let list = [...allRows];
+    const match = (hay: string, needle: string) =>
+      !needle.trim() || hay.toLowerCase().includes(needle.trim().toLowerCase());
+
+    list = list.filter((r) => {
+      const dossier = parseSaleContractDossier(r.saleContractDossier);
+      const nif = String(dossier.contribuinte ?? "").trim();
+      const contrato = String(dossier.id_contrato ?? "").trim();
+      const saleId = String(r.publicSaleId ?? "").trim();
+      return (
+        match(r.contactName || "", colCliente) &&
+        match(`${r.contactPhone || ""}`, colContacto) &&
+        match(nif, colNif) &&
+        match(saleId, colSaleId) &&
+        match(contrato, colContrato)
+      );
+    });
+
+    if (sortCliente) {
+      list.sort((a, b) => {
+        const cmp = (a.contactName || "").localeCompare(b.contactName || "", "pt");
+        return sortCliente === "asc" ? cmp : -cmp;
+      });
+    }
+    return list;
+  }, [allRows, colCliente, colContacto, colNif, colSaleId, colContrato, sortCliente]);
+
   const nextCursor = pipelineQuery.data?.nextCursor ?? null;
-
-  const hasActiveFilters =
-    filter !== "__all" ||
-    createdFrom.trim() !== "" ||
-    createdTo.trim() !== "" ||
-    activatedFrom.trim() !== "" ||
-    activatedTo.trim() !== "";
-
-  const clearAllFilters = () => {
-    setFilter("__all");
-    setCreatedFrom("");
-    setCreatedTo("");
-    setActivatedFrom("");
-    setActivatedTo("");
-    setCursor(undefined);
-    setAllRows([]);
-    void utils.sales.pipeline.invalidate();
-  };
 
   useEffect(() => {
     if (!sheetSale) return;
     setSheetContactName(sheetSale.contactName?.trim() || "");
-    const detail = parseSaleDetailJson(sheetSale.saleDetailJson);
+    const detail = parseSaleDetailJson(sheetSale.saleDetailJson) as {
+      operadoraAtual?: string;
+      debitoDireto?: boolean;
+      cartoesMoveis?: number;
+    };
     setSheetOperadora(detail.operadoraAtual ?? "");
+    setDebitoDireto(!!detail.debitoDireto);
+    setCartoesMoveis(
+      typeof detail.cartoesMoveis === "number" && detail.cartoesMoveis >= 0 && detail.cartoesMoveis <= 4
+        ? detail.cartoesMoveis
+        : 0,
+    );
     const d = parseSaleContractDossier(sheetSale.saleContractDossier);
     const init: Record<string, string> = {};
     for (const f of SALE_CONTRACT_DOSSIER_FIELDS) {
@@ -339,6 +360,8 @@ export default function Acompanhamento() {
       desativacaoApoiada: services.desativacaoApoiada,
       antigoTitularNome: services.antigoTitularNome.trim() || null,
       antigoTitularNif: services.antigoTitularNif.trim() || null,
+      debitoDireto,
+      cartoesMoveis,
     });
     await updateDocMutation.mutateAsync({
       saleId: sheetSale.id,
@@ -396,80 +419,12 @@ export default function Acompanhamento() {
       </div>
 
       <Card className="border-0 shadow-sm overflow-hidden">
-        <div className="flex flex-wrap items-end gap-2 gap-y-3 border-b bg-muted/20 px-4 py-3">
-          <div className="flex min-w-[200px] flex-1 flex-col gap-1 sm:max-w-[280px]">
-            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Estado
-            </Label>
-            <Select value={filter} onValueChange={setFilter}>
-              <SelectTrigger className="h-9 bg-background">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {STATUS_OPTIONS.map((o) => (
-                  <SelectItem key={o.value} value={o.value}>
-                    {o.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Criação
-            </Label>
-            <div className="flex items-center gap-1.5">
-              <Input
-                type="date"
-                className="h-9 w-[132px] bg-background"
-                value={createdFrom}
-                onChange={(e) => setCreatedFrom(e.target.value)}
-              />
-              <span className="text-muted-foreground text-xs">—</span>
-              <Input
-                type="date"
-                className="h-9 w-[132px] bg-background"
-                value={createdTo}
-                onChange={(e) => setCreatedTo(e.target.value)}
-              />
-            </div>
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-              Activação
-            </Label>
-            <div className="flex items-center gap-1.5">
-              <Input
-                type="date"
-                className="h-9 w-[132px] bg-background"
-                value={activatedFrom}
-                onChange={(e) => setActivatedFrom(e.target.value)}
-              />
-              <span className="text-muted-foreground text-xs">—</span>
-              <Input
-                type="date"
-                className="h-9 w-[132px] bg-background"
-                value={activatedTo}
-                onChange={(e) => setActivatedTo(e.target.value)}
-              />
-            </div>
-          </div>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="h-9 gap-1.5 shrink-0"
-            disabled={!hasActiveFilters}
-            onClick={clearAllFilters}
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            Limpar Filtros
-          </Button>
+        <div className="flex items-center justify-end gap-2 border-b bg-muted/20 px-4 py-2">
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="h-9 gap-1.5 shrink-0 ml-auto"
+            className="h-9 gap-1.5"
             disabled={exportCsvMutation.isPending}
             onClick={async () => {
               try {
@@ -514,15 +469,15 @@ export default function Acompanhamento() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b bg-muted/40 text-left text-muted-foreground">
-                    <th className="p-3 font-medium">Cliente</th>
-                    <th className="p-3 font-medium">Data de Registo</th>
-                    <th className="p-3 font-medium">NIF</th>
-                    <th className="p-3 font-medium">ID da Venda</th>
-                    <th className="p-3 font-medium">Acesso</th>
-                    <th className="p-3 font-medium">Estado (Instalação)</th>
-                    <th className="p-3 font-medium">Estado do Contrato</th>
-                    <th className="p-3 font-medium">Data de Instalação</th>
-                    <th className="p-3 font-medium">Hora da Instalação</th>
+                    <th className="p-3"><ColumnHeaderFilter label="Cliente" textFilter={colCliente} onTextFilter={setColCliente} sort={sortCliente} onSort={setSortCliente} active={!!colCliente.trim() || !!sortCliente} /></th>
+                    <th className="p-3"><ColumnHeaderFilter label="Contacto" textFilter={colContacto} onTextFilter={setColContacto} active={!!colContacto.trim()} /></th>
+                    <th className="p-3">Data de Registo</th>
+                    <th className="p-3"><ColumnHeaderFilter label="NIF" textFilter={colNif} onTextFilter={setColNif} active={!!colNif.trim()} /></th>
+                    <th className="p-3"><ColumnHeaderFilter label="ID da Venda" textFilter={colSaleId} onTextFilter={setColSaleId} active={!!colSaleId.trim()} /></th>
+                    <th className="p-3"><ColumnHeaderFilter label="ID de Contrato" textFilter={colContrato} onTextFilter={setColContrato} active={!!colContrato.trim()} /></th>
+                    <th className="p-3"><ColumnHeaderFilter label="Estado (Instalação)" selectFilter={filter} onSelectFilter={setFilter} selectOptions={STATUS_OPTIONS.map((o) => ({ value: o.value, label: o.label }))} active={filter !== "__all"} /></th>
+                    <th className="p-3">Estado do Contrato</th>
+                    <th className="p-3">Data de Activação</th>
                     <th className="p-3 font-medium w-[150px]">Acções</th>
                   </tr>
                 </thead>
@@ -532,7 +487,7 @@ export default function Acompanhamento() {
                     const instValid = inst && !Number.isNaN(inst.getTime());
                     const dossier = parseSaleContractDossier(r.saleContractDossier);
                     const nif = String(dossier.contribuinte ?? "").trim();
-                    const acesso = dossierActivationCode(dossier) || "—";
+                    const idContrato = String(dossier.id_contrato ?? "").trim() || "—";
                     const saleIdLabel = String(r.publicSaleId ?? "").trim() || "—";
                     const registoLabel = formatRegistoDate(r);
                     const docLabel =
@@ -549,29 +504,20 @@ export default function Acompanhamento() {
                             "bg-primary/10 ring-1 ring-inset ring-primary/20",
                         )}
                       >
-                        <td className="p-3">
-                          <div className="font-medium">{r.contactName || "—"}</div>
-                          <div className="text-xs text-muted-foreground font-mono">{r.contactPhone || ""}</div>
-                        </td>
+                        <td className="p-3 font-medium">{r.contactName || "—"}</td>
+                        <td className="p-3 font-mono text-xs text-muted-foreground">{r.contactPhone || "—"}</td>
                         <td className="p-3 whitespace-nowrap text-muted-foreground">{registoLabel}</td>
                         <td className="p-3 font-mono text-xs">{nif || "—"}</td>
                         <td className="p-3 font-mono text-xs">{saleIdLabel}</td>
-                        <td className="p-3 font-mono text-xs">{acesso}</td>
+                        <td className="p-3 font-mono text-xs">{idContrato}</td>
                         <td className="p-3">{salePipelineStatusLabel(r.status)}</td>
                         <td className="p-3">{docLabel}</td>
                         <td className="p-3 whitespace-nowrap text-muted-foreground">
-                          {instValid
-                            ? inst!.toLocaleDateString("pt-PT", {
-                                dateStyle: "short",
-                              })
-                            : "—"}
-                        </td>
-                        <td className="p-3 whitespace-nowrap text-muted-foreground">
-                          {instValid
-                            ? inst!.toLocaleTimeString("pt-PT", {
-                                timeStyle: "short",
-                              })
-                            : "—"}
+                          {(() => {
+                            const ativ = r.dataAtivacao != null ? new Date(r.dataAtivacao as unknown as string) : null;
+                            const ok = ativ && !Number.isNaN(ativ.getTime());
+                            return ok ? ativ!.toLocaleDateString("pt-PT", { dateStyle: "short" }) : "—";
+                          })()}
                         </td>
                         <td className="p-3 space-y-2">
                           {canActivateService && r.status !== "activo" && r.status !== "cancelado" ? (
@@ -644,10 +590,13 @@ export default function Acompanhamento() {
                   Gerais
                 </TabsTrigger>
                 <TabsTrigger value="telecom" className="data-[state=active]:bg-muted">
-                  Serviços telecom
+                  Formulários
                 </TabsTrigger>
-                <TabsTrigger value="documentos" className="data-[state=active]:bg-muted">
-                  Documentos
+                <TabsTrigger value="dados_clientes" className="data-[state=active]:bg-muted">
+                  Dados de Clientes
+                </TabsTrigger>
+                <TabsTrigger value="anexos" className="data-[state=active]:bg-muted">
+                  Documentos (Anexos)
                 </TabsTrigger>
               </TabsList>
             </div>
@@ -816,7 +765,7 @@ export default function Acompanhamento() {
               </ScrollArea>
             </TabsContent>
 
-            <TabsContent value="documentos" className="m-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+            <TabsContent value="dados_clientes" className="m-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
               <ScrollArea className="h-[min(52vh,520px)] px-6">
                 <div className="space-y-8 py-4 pr-3">
                   {SECTION_ORDER.map((section) => {
@@ -849,6 +798,14 @@ export default function Acompanhamento() {
                     );
                   })}
                 </div>
+              </ScrollArea>
+            </TabsContent>
+
+            <TabsContent value="anexos" className="m-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+              <ScrollArea className="h-[min(52vh,520px)] px-6">
+                {sheetSale ? (
+                  <SaleAttachmentsPanel saleId={sheetSale.id} publicSaleId={sheetSale.publicSaleId} />
+                ) : null}
               </ScrollArea>
             </TabsContent>
           </Tabs>

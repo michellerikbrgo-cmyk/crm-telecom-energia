@@ -42,7 +42,10 @@ import {
   fidelizacoesTerminando,
   motivosNaoFechamento,
   calendarEventInvitees,
+  saleAttachments,
 } from "../drizzle/schema";
+import { wherePendenteOpenStatus } from "./pendentesStatus";
+import { storagePut } from "./storage";
 import { alias } from "drizzle-orm/mysql-core";
 import {
   eq,
@@ -90,7 +93,6 @@ import { generateUniquePublicPendingId } from "./pendingPublicId";
 import { getPendenteVendedorIdsForUser } from "./pendentesScope";
 import { generateUniquePublicSaleId } from "./salePublicId";
 import { generateContractPdfZip } from "./contractPdf";
-import { storagePut } from "./storage";
 import {
   decryptText,
   encryptText,
@@ -260,6 +262,11 @@ function mergeSaleDetailJson(
 function canReviewBetaSuggestions(user: unknown): boolean {
   const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
   return !!(u?.isSuperAdmin || u?.crmRole === "coordenador");
+}
+
+function canDeleteSaleAttachments(user: unknown): boolean {
+  const u = user as { isSuperAdmin?: boolean; crmRole?: string } | null;
+  return !!(u?.isSuperAdmin || ["ce", "cej", "coordenador"].includes(u?.crmRole ?? ""));
 }
 
 async function purgeStaleCompletedBetaSuggestions(db: NonNullable<Awaited<ReturnType<typeof getDb>>>) {
@@ -1259,7 +1266,8 @@ export const appRouter = router({
             returnDate: new Date(input.returnDate),
             notes: input.notes?.trim() || null,
             offerDesired: input.offerDesired?.trim() || null,
-            status: "agendado",
+            status:
+              input.contactStatusAfter === "cliente_fidelizado" ? "fidelizado" : "agendado",
             priorityLevel: input.priorityLevel ?? 3,
             publicPendingId,
             clientNif: input.clientNif?.trim() || null,
@@ -2740,13 +2748,13 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         pendentesResult = await db.select({ count: sql<number>`COUNT(*)` }).from(pendentes)
           .where(and(
             eq(pendentes.vendedorId, user.id),
-            eq(pendentes.status, "agendado"),
+            wherePendenteOpenStatus(),
             gte(pendentes.returnDate, today),
             lt(pendentes.returnDate, tomorrow),
           ));
       } else {
         const pparts: SQL[] = [
-          eq(pendentes.status, "agendado"),
+          wherePendenteOpenStatus(),
           gte(pendentes.returnDate, today),
           lt(pendentes.returnDate, tomorrow),
         ];
@@ -2757,10 +2765,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
 
       // Pendentes em atraso (agendados com data já passada)
       const now = new Date();
-      const overdueConditions: SQL[] = [
-        eq(pendentes.status, "agendado"),
-        lt(pendentes.returnDate, now),
-      ];
+      const overdueConditions: SQL[] = [wherePendenteOpenStatus(), lt(pendentes.returnDate, now)];
       if (user?.crmRole === "vendedor") overdueConditions.push(eq(pendentes.vendedorId, user.id));
       else if (tenantPendentesV) overdueConditions.push(tenantPendentesV);
 
@@ -2870,6 +2875,8 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         pendenteAlerts,
         dialerQueueEligibleCount,
         rankingPosition,
+        pendenteMenuBadgeCount:
+          Number(overdueResult[0]?.count ?? 0) + Number(pendentesResult[0]?.count ?? 0),
       };
     }),
   }),
@@ -3072,7 +3079,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       if (user?.crmRole === "vendedor") {
         const dueWhere: SQL[] = [
           eq(pendentes.vendedorId, user.id),
-          eq(pendentes.status, "agendado"),
+          wherePendenteOpenStatus(),
           lte(pendentes.returnDate, now),
         ];
         if (pT) dueWhere.push(pT);
@@ -3260,10 +3267,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       if (!["cej", "ce", "coordenador"].includes(user?.crmRole) && !isSuperAdminUser(user)) return [];
 
       const now = new Date();
-      const overdue: SQL[] = [
-        eq(pendentes.status, "agendado"),
-        lte(pendentes.returnDate, now),
-      ];
+      const overdue: SQL[] = [wherePendenteOpenStatus(), lte(pendentes.returnDate, now)];
       const pvin = whereInTenantUserIds(await getSellerIdsForPipelineScope(db, user), pendentes.vendedorId);
       if (pvin) overdue.push(pvin);
       const pten = whereContactsForUser(user as any);
@@ -3889,6 +3893,65 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         totalCalls: 0,
       }));
     }),
+
+    /** Pódios por categoria (vendedor / CEJ / CE) no mesmo tenant do coordenador. */
+    rankingBoard: protectedProcedure.query(async ({ ctx }) => {
+      const db = await getDb();
+      if (!db) return { vendedores: [], cej: [], ce: [] };
+      const user = ctx.user as Record<string, unknown>;
+      const now = new Date();
+      const mo = now.getMonth() + 1;
+      const yr = now.getFullYear();
+
+      const tenantIds = await getUserIdsInTenant(db, user);
+      const saleParts: SQL[] = [
+        eq(sales.status, "activo"),
+        sql`(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) IS NOT NULL`,
+        sql`MONTH(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${mo}`,
+        sql`YEAR(COALESCE(${sales.dataAtivacao}, ${sales.installationDate})) = ${yr}`,
+      ];
+      if (tenantIds !== "ALL") {
+        if (!tenantIds.length) return { vendedores: [], cej: [], ce: [] };
+        saleParts.push(inArray(sales.vendedorId, tenantIds));
+      }
+
+      const counts = await db
+        .select({
+          userId: sales.vendedorId,
+          activoSales: sql<number>`count(*)`,
+        })
+        .from(sales)
+        .where(and(...saleParts))
+        .groupBy(sales.vendedorId)
+        .orderBy(desc(sql`count(*)`));
+
+      if (!counts.length) return { vendedores: [], cej: [], ce: [] };
+
+      const userIds = counts.map((c) => c.userId);
+      const roleRows = await db
+        .select({ id: users.id, name: users.name, avatarUrl: users.avatarUrl, crmRole: users.crmRole })
+        .from(users)
+        .where(inArray(users.id, userIds));
+      const roleMap = Object.fromEntries(roleRows.map((r) => [r.id, r]));
+
+      const buildPodium = (role: "vendedor" | "cej" | "ce") => {
+        const filtered = counts.filter((c) => roleMap[c.userId]?.crmRole === role);
+        return filtered.map((c, i) => ({
+          position: i + 1,
+          userId: c.userId,
+          userName: roleMap[c.userId]?.name || `Utilizador #${c.userId}`,
+          avatarUrl: roleMap[c.userId]?.avatarUrl ?? null,
+          activoSales: Number(c.activoSales),
+          crmRole: role,
+        }));
+      };
+
+      return {
+        vendedores: buildPodium("vendedor"),
+        cej: buildPodium("cej"),
+        ce: buildPodium("ce"),
+      };
+    }),
   }),
 
   // ============ AUDIT (só leitura — nunca UPDATE/DELETE na app; linhas intocáveis) ============
@@ -4280,6 +4343,13 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
 
         const patch: Record<string, unknown> = {};
         if (input.status !== undefined) patch.status = input.status;
+        if (
+          input.status === "activo" &&
+          input.dataAtivacao === undefined &&
+          !(s as { dataAtivacao?: Date | null }).dataAtivacao
+        ) {
+          patch.dataAtivacao = new Date();
+        }
         if (input.cancelReason !== undefined) patch.cancelReason = input.cancelReason;
         if (input.installationDate !== undefined) {
           patch.installationDate = input.installationDate ? new Date(input.installationDate) : null;
@@ -4358,6 +4428,135 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         return { success: true as const };
       }),
 
+    listAttachments: protectedProcedure
+      .input(z.object({ saleId: z.number().int().positive() }))
+      .query(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) return [];
+        const user = ctx.user as Record<string, unknown>;
+        const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+        const rows = await db
+          .select({
+            id: saleAttachments.id,
+            saleId: saleAttachments.saleId,
+            storageKey: saleAttachments.storageKey,
+            originalName: saleAttachments.originalName,
+            mimeType: saleAttachments.mimeType,
+            sizeBytes: saleAttachments.sizeBytes,
+            uploadedBy: saleAttachments.uploadedBy,
+            createdAt: saleAttachments.createdAt,
+            uploaderName: users.name,
+          })
+          .from(saleAttachments)
+          .leftJoin(users, eq(saleAttachments.uploadedBy, users.id))
+          .where(eq(saleAttachments.saleId, input.saleId))
+          .orderBy(desc(saleAttachments.createdAt));
+        return rows.map((r) => ({
+          ...r,
+          url: `/manus-storage/${r.storageKey}`,
+        }));
+      }),
+
+    uploadAttachment: protectedProcedure
+      .input(
+        z.object({
+          saleId: z.number().int().positive(),
+          filename: z.string().min(1).max(255),
+          base64: z.string().min(1),
+          mimeType: z.string().max(128).optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as Record<string, unknown>;
+        const [s] = await db.select().from(sales).where(eq(sales.id, input.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+
+        const lower = input.filename.toLowerCase();
+        const allowed =
+          lower.endsWith(".pdf") ||
+          lower.endsWith(".png") ||
+          lower.endsWith(".jpg") ||
+          lower.endsWith(".jpeg") ||
+          lower.endsWith(".webp");
+        if (!allowed) {
+          throw new Error("Formatos permitidos: PDF, PNG, JPG, WEBP.");
+        }
+
+        const buffer = Buffer.from(input.base64, "base64");
+        if (buffer.byteLength > 15 * 1024 * 1024) {
+          throw new Error("Ficheiro demasiado grande (máx. 15 MB).");
+        }
+
+        const saleLabel = String((s as { publicSaleId?: string | null }).publicSaleId || s.id);
+        const safeName =
+          input.filename.replace(/[^a-zA-Z0-9._-]/g, "_").replace(/_+/g, "_").slice(0, 180) ||
+          "documento";
+        const mime =
+          input.mimeType?.trim() ||
+          (lower.endsWith(".pdf")
+            ? "application/pdf"
+            : lower.endsWith(".png")
+              ? "image/png"
+              : lower.endsWith(".webp")
+                ? "image/webp"
+                : "image/jpeg");
+        const relKey = `sales/${input.saleId}/${saleLabel}/${safeName}`;
+        const { key } = await storagePut(relKey, buffer, mime);
+
+        await db.insert(saleAttachments).values({
+          saleId: input.saleId,
+          storageKey: key,
+          originalName: input.filename,
+          mimeType: mime,
+          sizeBytes: buffer.byteLength,
+          uploadedBy: Number(user.id),
+        } as any);
+
+        await db.insert(auditLogs).values({
+          userId: Number(user.id),
+          action: "sale_attachment_upload",
+          entity: "sale",
+          entityId: input.saleId,
+          details: `Anexo: ${input.filename}`.slice(0, 255),
+        });
+
+        return { success: true as const, url: `/manus-storage/${key}` };
+      }),
+
+    deleteAttachment: protectedProcedure
+      .input(z.object({ attachmentId: z.number().int().positive() }))
+      .mutation(async ({ ctx, input }) => {
+        if (!canDeleteSaleAttachments(ctx.user)) {
+          throw new Error("Só Chefe de Equipa (ou superior) pode eliminar documentos.");
+        }
+        const db = await getDb();
+        if (!db) throw new Error("Database not available");
+        const user = ctx.user as Record<string, unknown>;
+        const [att] = await db
+          .select()
+          .from(saleAttachments)
+          .where(eq(saleAttachments.id, input.attachmentId))
+          .limit(1);
+        if (!att) throw new Error("Documento não encontrado");
+        const [s] = await db.select().from(sales).where(eq(sales.id, att.saleId)).limit(1);
+        if (!s) throw new Error("Venda não encontrada");
+        await assertSalePipelineAccessForSale(db, s, user);
+        await db.delete(saleAttachments).where(eq(saleAttachments.id, input.attachmentId));
+        await db.insert(auditLogs).values({
+          userId: Number(user.id),
+          action: "sale_attachment_delete",
+          entity: "sale",
+          entityId: att.saleId,
+          details: `Removeu anexo #${input.attachmentId}`,
+        });
+        return { success: true as const };
+      }),
+
     /** Ficha de contrato / dados para exportação — todos os campos opcionais. */
     saveContractDossier: protectedProcedure
       .input(
@@ -4427,6 +4626,8 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
           desativacaoApoiada: z.boolean().optional(),
           antigoTitularNome: z.string().max(255).nullable().optional(),
           antigoTitularNif: z.string().max(32).nullable().optional(),
+          debitoDireto: z.boolean().optional(),
+          cartoesMoveis: z.number().int().min(0).max(4).optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -4443,6 +4644,17 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         if (input.desativacaoApoiada !== undefined) patch.desativacaoApoiada = input.desativacaoApoiada;
         if (input.antigoTitularNome !== undefined) patch.antigoTitularNome = input.antigoTitularNome;
         if (input.antigoTitularNif !== undefined) patch.antigoTitularNif = input.antigoTitularNif;
+        if (input.debitoDireto !== undefined || input.cartoesMoveis !== undefined) {
+          const detail: Record<string, unknown> = {};
+          try {
+            Object.assign(detail, JSON.parse(String((s as { saleDetailJson?: string }).saleDetailJson || "{}")));
+          } catch {
+            /* ignore */
+          }
+          if (input.debitoDireto !== undefined) detail.debitoDireto = input.debitoDireto;
+          if (input.cartoesMoveis !== undefined) detail.cartoesMoveis = input.cartoesMoveis;
+          patch.saleDetailJson = JSON.stringify(detail);
+        }
         if (Object.keys(patch).length) {
           await db.update(sales).set(patch as any).where(eq(sales.id, input.saleId));
         }

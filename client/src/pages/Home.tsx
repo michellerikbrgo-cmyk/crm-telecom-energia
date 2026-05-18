@@ -197,8 +197,8 @@ export default function Home() {
                       {a.vendedorName ? ` · ${a.vendedorName}` : ""}
                     </span>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => setLocation("/discador")}>
-                    Discador
+                  <Button size="sm" variant="outline" onClick={() => setLocation("/pendentes")}>
+                    Pendentes
                   </Button>
                 </div>
               ))}

@@ -41,6 +41,7 @@ import { PriorityStars, PriorityStarsDisplay } from "@/components/PriorityStars"
 
 const STATUS_LABELS: Record<string, string> = {
   agendado: "Agendado",
+  fidelizado: "Fidelizado",
   realizado: "Realizado",
   expirado: "Expirado",
   cancelado: "Cancelado",

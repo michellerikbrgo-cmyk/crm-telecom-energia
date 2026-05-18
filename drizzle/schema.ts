@@ -256,7 +256,16 @@ export const pendentes = mysqlTable("pendentes", {
   returnDate: timestamp("returnDate").notNull(),
   notes: text("notes"),
   offerDesired: text("offerDesired"),
-  status: mysqlEnum("status", ["agendado", "realizado", "expirado", "cancelado", "nao_fechou"]).default("agendado").notNull(),
+  status: mysqlEnum("status", [
+    "agendado",
+    "realizado",
+    "expirado",
+    "cancelado",
+    "nao_fechou",
+    "fidelizado",
+  ])
+    .default("agendado")
+    .notNull(),
   motivoNaoFechamentoId: int("motivo_nao_fechamento_id"),
   notified: boolean("notified").default(false).notNull(),
   /** 1 = mais fraco … 5 = mais forte (prioridade nos alertas). */
@@ -507,6 +516,20 @@ export const sales = mysqlTable("sales", {
 
 export type Sale = typeof sales.$inferSelect;
 export type InsertSale = typeof sales.$inferInsert;
+
+// ============ SALE ATTACHMENTS (cofre documentos por venda) ============
+export const saleAttachments = mysqlTable("sale_attachments", {
+  id: int("id").autoincrement().primaryKey(),
+  saleId: int("sale_id").notNull(),
+  storageKey: varchar("storage_key", { length: 512 }).notNull(),
+  originalName: varchar("original_name", { length: 255 }).notNull(),
+  mimeType: varchar("mime_type", { length: 128 }).notNull(),
+  sizeBytes: int("size_bytes").notNull(),
+  uploadedBy: int("uploaded_by").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+});
+
+export type SaleAttachment = typeof saleAttachments.$inferSelect;
 
 // ============ BLACKLIST ============
 export const blacklist = mysqlTable(

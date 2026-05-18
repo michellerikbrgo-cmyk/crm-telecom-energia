@@ -169,6 +169,10 @@ function DashboardLayoutContent({
   const pricingPlansQuery = trpc.system.getPricingPlansFeature.useQuery(undefined, {
     staleTime: 30_000,
   });
+  const dashboardStatsQuery = trpc.dashboard.stats.useQuery(undefined, {
+    refetchInterval: 60_000,
+  });
+  const pendenteBadge = Number(dashboardStatsQuery.data?.pendenteMenuBadgeCount ?? 0);
   const filteredMenuItems: MenuItem[] = useMemo(() => {
     const planosEnabled = !!pricingPlansQuery.data?.enabled;
     return filterNavCatalog(NAV_CATALOG, {
@@ -267,12 +271,20 @@ function DashboardLayoutContent({
                       isActive={isActive}
                       onClick={() => setLocation(item.path)}
                       tooltip={item.label}
-                      className={`h-10 transition-all font-normal`}
+                      className="h-10 transition-all font-normal relative"
                     >
                       <item.icon
                         className={`h-4 w-4 ${isActive ? "text-primary" : ""}`}
                       />
                       <span>{item.label}</span>
+                      {item.path === "/pendentes" && pendenteBadge > 0 ? (
+                        <span
+                          className="absolute right-2 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-bold text-destructive-foreground"
+                          aria-label={`${pendenteBadge} pendentes`}
+                        >
+                          {pendenteBadge > 99 ? "99+" : pendenteBadge}
+                        </span>
+                      ) : null}
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 );
