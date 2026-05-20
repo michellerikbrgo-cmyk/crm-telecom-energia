@@ -29,15 +29,22 @@ import {
 import { Clock, Plus, Pencil, Search, ShoppingCart } from "lucide-react";
 import type { inferRouterOutputs } from "@trpc/server";
 import { useAuth } from "@/_core/hooks/useAuth";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppRouter } from "../../../server/routers";
 import { trpc } from "@/lib/trpc";
+import { toast } from "sonner";
+import { useSearch } from "wouter";
+import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
+import { PriorityStars, PriorityStarsDisplay } from "@/components/PriorityStars";
+import {
+  ColumnHeaderFilter,
+  matchDateColumnFilter,
+  type ColumnSort,
+  type DateFilterMode,
+} from "@/components/ColumnHeaderFilter";
 
 type PendenteRow = inferRouterOutputs<AppRouter>["pendentes"]["list"][number];
 type ContactPickerRow = inferRouterOutputs<AppRouter>["contacts"]["searchPicker"][number];
-import { toast } from "sonner";
-import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
-import { PriorityStars, PriorityStarsDisplay } from "@/components/PriorityStars";
 
 const STATUS_LABELS: Record<string, string> = {
   agendado: "Agendado",
@@ -50,32 +57,31 @@ const STATUS_LABELS: Record<string, string> = {
 
 export default function Pendentes() {
   const { user } = useAuth();
+  const search = useSearch();
   const authUserId = (user as { id?: number } | null)?.id;
   const utils = trpc.useUtils();
   const operatorsQuery = trpc.pendentes.assignableOperators.useQuery();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [editPendente, setEditPendente] = useState<Record<string, unknown> | null>(null);
-  const [filterPriority, setFilterPriority] = useState<string>("all");
-  const [filterStatus, setFilterStatus] = useState<string>("all");
-  const [returnFrom, setReturnFrom] = useState("");
-  const [returnTo, setReturnTo] = useState("");
+  const [editPendente, setEditPendente] = useState<PendenteRow | null>(null);
+  const deepLinkHandled = useRef(false);
+
+  const [colCliente, setColCliente] = useState("");
+  const [colNif, setColNif] = useState("");
+  const [colOperador, setColOperador] = useState("");
+  const [retornoDateMode, setRetornoDateMode] = useState<DateFilterMode>("day");
+  const [retornoDay, setRetornoDay] = useState("");
+  const [retornoMonth, setRetornoMonth] = useState("");
+  const [sortCliente, setSortCliente] = useState<ColumnSort>(null);
+
   const [contactSearch, setContactSearch] = useState("");
   const [selectedContactId, setSelectedContactId] = useState<number | null>(null);
 
-  const listInput = useMemo(
-    () => ({
-      priorityLevel: filterPriority !== "all" ? Number(filterPriority) : undefined,
-      status:
-        filterStatus !== "all"
-          ? (filterStatus as "agendado" | "realizado" | "expirado" | "cancelado" | "nao_fechou")
-          : undefined,
-      returnDateFrom: returnFrom || undefined,
-      returnDateTo: returnTo || undefined,
-    }),
-    [filterPriority, filterStatus, returnFrom, returnTo],
-  );
+  const openParam = useMemo(() => {
+    const v = new URLSearchParams(search).get("open")?.trim();
+    return v || "";
+  }, [search]);
 
-  const pendentesQuery = trpc.pendentes.list.useQuery(listInput);
+  const pendentesQuery = trpc.pendentes.list.useQuery(undefined);
   const motivosQuery = trpc.motivosNaoFechamento.list.useQuery();
   const pickerQuery = trpc.contacts.searchPicker.useQuery(
     { q: contactSearch.trim() },
@@ -222,7 +228,7 @@ export default function Pendentes() {
     });
   };
 
-  const openEdit = (p: Record<string, unknown>) => {
+  const openEdit = (p: PendenteRow) => {
     setEditPendente(p);
     const d = new Date(p.returnDate as string);
     const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -230,14 +236,57 @@ export default function Pendentes() {
       returnDate: local,
       notes: String(p.notes ?? ""),
       offerDesired: String(p.offerDesired ?? ""),
-      historicoChamada: String((p as { historicoChamada?: string }).historicoChamada ?? ""),
+      historicoChamada: String(p.historicoChamada ?? ""),
       status: String(p.status ?? "agendado"),
       priorityLevel: String(p.priorityLevel ?? 3),
       motivoNaoFechamentoId: p.motivoNaoFechamentoId ? String(p.motivoNaoFechamentoId) : "",
     });
   };
 
-  const rows: PendenteRow[] = pendentesQuery.data ?? [];
+  const allRows: PendenteRow[] = pendentesQuery.data ?? [];
+
+  const rows = useMemo(() => {
+    const match = (hay: string, needle: string) =>
+      !needle.trim() || hay.toLowerCase().includes(needle.trim().toLowerCase());
+
+    let list = allRows.filter((p) => {
+      const operador = String(p.criadorName ?? p.vendedorName ?? "");
+      const clienteHay = `${p.contactName ?? ""} ${p.contactPhone ?? ""}`;
+      return (
+        match(clienteHay, colCliente) &&
+        match(String(p.clientNif ?? ""), colNif) &&
+        match(operador, colOperador) &&
+        matchDateColumnFilter(p.returnDate, retornoDateMode, retornoDay, retornoMonth)
+      );
+    });
+
+    if (sortCliente) {
+      list = [...list].sort((a, b) => {
+        const cmp = (a.contactName || a.contactPhone || "").localeCompare(
+          b.contactName || b.contactPhone || "",
+          "pt",
+        );
+        return sortCliente === "asc" ? cmp : -cmp;
+      });
+    }
+    return list;
+  }, [allRows, colCliente, colNif, colOperador, retornoDateMode, retornoDay, retornoMonth, sortCliente]);
+
+  useEffect(() => {
+    if (!openParam || deepLinkHandled.current || !allRows.length) return;
+    const found = allRows.find(
+      (p) =>
+        (p.publicPendingId && p.publicPendingId.toUpperCase() === openParam.toUpperCase()) ||
+        String(p.id) === openParam.replace(/^#/, ""),
+    );
+    if (found) {
+      deepLinkHandled.current = true;
+      openEdit(found);
+      const url = new URL(window.location.href);
+      url.searchParams.delete("open");
+      window.history.replaceState({}, "", url.pathname + (url.search || ""));
+    }
+  }, [openParam, allRows]);
 
   return (
     <div className="space-y-6">
@@ -393,39 +442,6 @@ export default function Pendentes() {
         </Dialog>
       </div>
 
-      <Card className="border-0 shadow-sm">
-        <CardContent className="py-4 flex flex-wrap gap-3">
-          <Select value={filterPriority} onValueChange={setFilterPriority}>
-            <SelectTrigger className="w-36">
-              <SelectValue placeholder="Prioridade" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todas prioridades</SelectItem>
-              {[5, 4, 3, 2, 1].map((n) => (
-                <SelectItem key={n} value={String(n)}>
-                  Prioridade {n}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select value={filterStatus} onValueChange={setFilterStatus}>
-            <SelectTrigger className="w-40">
-              <SelectValue placeholder="Estado" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Todos estados</SelectItem>
-              {Object.entries(STATUS_LABELS).map(([k, l]) => (
-                <SelectItem key={k} value={k}>
-                  {l}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input type="date" className="w-40" value={returnFrom} onChange={(e) => setReturnFrom(e.target.value)} />
-          <Input type="date" className="w-40" value={returnTo} onChange={(e) => setReturnTo(e.target.value)} />
-        </CardContent>
-      </Card>
-
       <Card className="border-0 shadow-sm overflow-hidden">
         <CardContent className="p-0">
           {pendentesQuery.isLoading ? (
@@ -443,11 +459,47 @@ export default function Pendentes() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>PENDING_ID</TableHead>
-                    <TableHead>Cliente</TableHead>
-                    <TableHead>Operador</TableHead>
-                    <TableHead>NIF</TableHead>
+                    <TableHead>
+                      <ColumnHeaderFilter
+                        label="Cliente"
+                        textFilter={colCliente}
+                        onTextFilter={setColCliente}
+                        sort={sortCliente}
+                        onSort={setSortCliente}
+                        active={!!colCliente.trim() || !!sortCliente}
+                      />
+                    </TableHead>
+                    <TableHead>
+                      <ColumnHeaderFilter
+                        label="Operador"
+                        textFilter={colOperador}
+                        onTextFilter={setColOperador}
+                        active={!!colOperador.trim()}
+                      />
+                    </TableHead>
+                    <TableHead>
+                      <ColumnHeaderFilter
+                        label="NIF"
+                        textFilter={colNif}
+                        onTextFilter={setColNif}
+                        active={!!colNif.trim()}
+                      />
+                    </TableHead>
                     <TableHead>Operadora</TableHead>
-                    <TableHead>Retorno</TableHead>
+                    <TableHead>
+                      <ColumnHeaderFilter
+                        label="Retorno"
+                        dateFilter={{
+                          mode: retornoDateMode,
+                          dayValue: retornoDay,
+                          monthValue: retornoMonth,
+                          onModeChange: setRetornoDateMode,
+                          onDayChange: setRetornoDay,
+                          onMonthChange: setRetornoMonth,
+                        }}
+                        active={!!retornoDay.trim() || !!retornoMonth.trim()}
+                      />
+                    </TableHead>
                     <TableHead>Prioridade</TableHead>
                     <TableHead>Estado</TableHead>
                     <TableHead className="text-right">Acções</TableHead>
@@ -467,8 +519,8 @@ export default function Pendentes() {
                             {p.contactPhone}
                           </div>
                         </TableCell>
-                        <TableCell className="text-sm max-w-[9rem] truncate" title={String((p as { criadorName?: string | null }).criadorName ?? p.vendedorName ?? "")}>
-                          {(p as { criadorName?: string | null }).criadorName || p.vendedorName || "—"}
+                        <TableCell className="text-sm max-w-[9rem] truncate" title={String(p.criadorName ?? p.vendedorName ?? "")}>
+                          {p.criadorName || p.vendedorName || "—"}
                         </TableCell>
                         <TableCell className="text-sm">{p.clientNif || "—"}</TableCell>
                         <TableCell className="text-sm">{p.operadoraAtual || "—"}</TableCell>

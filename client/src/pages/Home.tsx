@@ -22,6 +22,7 @@ const STATS_EMPTY = {
   },
   pendenteAlerts: [] as Array<{
     id: number;
+    publicPendingId?: string | null;
     contactId: number;
     returnDate: Date;
     contactPhone: string | null;
@@ -197,7 +198,14 @@ export default function Home() {
                       {a.vendedorName ? ` · ${a.vendedorName}` : ""}
                     </span>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => setLocation("/pendentes")}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => {
+                      const openId = (a as { publicPendingId?: string | null }).publicPendingId;
+                      setLocation(openId ? `/pendentes?open=${encodeURIComponent(openId)}` : "/pendentes");
+                    }}
+                  >
                     Pendentes
                   </Button>
                 </div>
@@ -240,7 +248,16 @@ export default function Home() {
                           {new Date(p.returnDate).toLocaleString("pt-PT")} · {p.status}
                         </div>
                       </div>
-                      <Button size="sm" variant="outline" onClick={() => setLocation("/pendentes")}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          const openId = (p as { publicPendingId?: string | null }).publicPendingId;
+                          setLocation(
+                            openId ? `/pendentes?open=${encodeURIComponent(openId)}` : "/pendentes",
+                          );
+                        }}
+                      >
                         Ver
                       </Button>
                     </div>

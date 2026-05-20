@@ -38,7 +38,7 @@ import {
 } from "@shared/saleServices";
 import { Checkbox } from "@/components/ui/checkbox";
 import { OperadoraAtualSelect } from "@/components/OperadoraAtualSelect";
-import { ColumnHeaderFilter, type ColumnSort } from "@/components/ColumnHeaderFilter";
+import { ColumnHeaderFilter, matchDateColumnFilter, type ColumnSort, type DateFilterMode } from "@/components/ColumnHeaderFilter";
 import { SaleAttachmentsPanel } from "@/components/SaleAttachmentsPanel";
 import { ClipboardList, FileDown, FileSpreadsheet, Printer } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -166,6 +166,8 @@ const SECTION_ORDER: SaleContractDossierSection[] = [
   "registo",
 ];
 
+const STATUS_FILTER_OPTIONS = STATUS_OPTIONS.filter((o) => o.value !== "__all");
+
 export default function Acompanhamento() {
   const { user } = useAuth();
   const authUser = user as { id?: number; name?: string; crmRole?: string } | null;
@@ -184,13 +186,24 @@ export default function Acompanhamento() {
     return Number.isFinite(id) && id > 0 ? id : undefined;
   }, [search]);
 
-  const [filter, setFilter] = useState<string>("__all");
+  const [statusFilters, setStatusFilters] = useState<string[]>([
+    "aguarda_instalacao",
+    "em_aberto",
+    "activo",
+  ]);
   const [colCliente, setColCliente] = useState("");
   const [colContacto, setColContacto] = useState("");
+  const [colVendedor, setColVendedor] = useState("");
   const [colNif, setColNif] = useState("");
   const [colSaleId, setColSaleId] = useState("");
   const [colContrato, setColContrato] = useState("");
   const [sortCliente, setSortCliente] = useState<ColumnSort>(null);
+  const [registoDateMode, setRegistoDateMode] = useState<DateFilterMode>("day");
+  const [registoDay, setRegistoDay] = useState("");
+  const [registoMonth, setRegistoMonth] = useState("");
+  const [ativacaoDateMode, setAtivacaoDateMode] = useState<DateFilterMode>("day");
+  const [ativacaoDay, setAtivacaoDay] = useState("");
+  const [ativacaoMonth, setAtivacaoMonth] = useState("");
   const [debitoDireto, setDebitoDireto] = useState(false);
   const [cartoesMoveis, setCartoesMoveis] = useState(0);
   const [sheetSale, setSheetSale] = useState<PipelineRow | null>(null);
@@ -209,21 +222,19 @@ export default function Acompanhamento() {
 
   const queryInput = useMemo(() => {
     const out: {
-      status?: "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado";
+      statuses?: Array<"aguarda_instalacao" | "em_aberto" | "activo" | "cancelado">;
       contactId?: number;
-      createdFrom?: string;
-      createdTo?: string;
-      activatedFrom?: string;
-      activatedTo?: string;
     } = {};
-    if (filter !== "__all") {
-      out.status = filter as (typeof out)["status"];
+    if (statusFilters.length > 0) {
+      out.statuses = statusFilters as Array<
+        "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado"
+      >;
     }
     if (highlightContactId != null) {
       out.contactId = highlightContactId;
     }
     return Object.keys(out).length > 0 ? out : undefined;
-  }, [filter, highlightContactId]);
+  }, [statusFilters, highlightContactId]);
 
   const utils = trpc.useUtils();
   const [cursor, setCursor] = useState<number | undefined>(undefined);
@@ -236,7 +247,7 @@ export default function Acompanhamento() {
   useEffect(() => {
     setCursor(undefined);
     setAllRows([]);
-  }, [filter, highlightContactId]);
+  }, [statusFilters, highlightContactId]);
 
   useEffect(() => {
     const page = pipelineQuery.data;
@@ -293,16 +304,23 @@ export default function Acompanhamento() {
       !needle.trim() || hay.toLowerCase().includes(needle.trim().toLowerCase());
 
     list = list.filter((r) => {
+      if (statusFilters.length === 0) return false;
+      if (!statusFilters.includes(r.status)) return false;
       const dossier = parseSaleContractDossier(r.saleContractDossier);
       const nif = String(dossier.contribuinte ?? "").trim();
       const contrato = String(dossier.id_contrato ?? "").trim();
       const saleId = String(r.publicSaleId ?? "").trim();
+      const registoRaw = r.closedAt ?? r.createdAt;
+      const ativRaw = r.dataAtivacao;
       return (
         match(r.contactName || "", colCliente) &&
         match(`${r.contactPhone || ""}`, colContacto) &&
+        match(String(r.vendedorName ?? ""), colVendedor) &&
         match(nif, colNif) &&
         match(saleId, colSaleId) &&
-        match(contrato, colContrato)
+        match(contrato, colContrato) &&
+        matchDateColumnFilter(registoRaw, registoDateMode, registoDay, registoMonth) &&
+        matchDateColumnFilter(ativRaw, ativacaoDateMode, ativacaoDay, ativacaoMonth)
       );
     });
 
@@ -313,7 +331,23 @@ export default function Acompanhamento() {
       });
     }
     return list;
-  }, [allRows, colCliente, colContacto, colNif, colSaleId, colContrato, sortCliente]);
+  }, [
+    allRows,
+    statusFilters,
+    colCliente,
+    colContacto,
+    colVendedor,
+    colNif,
+    colSaleId,
+    colContrato,
+    registoDateMode,
+    registoDay,
+    registoMonth,
+    ativacaoDateMode,
+    ativacaoDay,
+    ativacaoMonth,
+    sortCliente,
+  ]);
 
   const nextCursor = pipelineQuery.data?.nextCursor ?? null;
 
@@ -428,7 +462,10 @@ export default function Acompanhamento() {
             disabled={exportCsvMutation.isPending}
             onClick={async () => {
               try {
-                const status = filter === "__all" ? "__all" : filter;
+                const status =
+                  statusFilters.length === STATUS_FILTER_OPTIONS.length
+                    ? "__all"
+                    : (statusFilters[0] as "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado");
                 const data = await exportCsvMutation.mutateAsync({
                   status: status as "aguarda_instalacao" | "em_aberto" | "activo" | "cancelado" | "__all",
                 });
@@ -471,13 +508,50 @@ export default function Acompanhamento() {
                   <tr className="border-b bg-muted/40 text-left text-muted-foreground">
                     <th className="p-3"><ColumnHeaderFilter label="Cliente" textFilter={colCliente} onTextFilter={setColCliente} sort={sortCliente} onSort={setSortCliente} active={!!colCliente.trim() || !!sortCliente} /></th>
                     <th className="p-3"><ColumnHeaderFilter label="Contacto" textFilter={colContacto} onTextFilter={setColContacto} active={!!colContacto.trim()} /></th>
-                    <th className="p-3">Data de Registo</th>
+                    <th className="p-3"><ColumnHeaderFilter label="Vendedor" textFilter={colVendedor} onTextFilter={setColVendedor} active={!!colVendedor.trim()} /></th>
+                    <th className="p-3">
+                      <ColumnHeaderFilter
+                        label="Data de Registo"
+                        dateFilter={{
+                          mode: registoDateMode,
+                          dayValue: registoDay,
+                          monthValue: registoMonth,
+                          onModeChange: setRegistoDateMode,
+                          onDayChange: setRegistoDay,
+                          onMonthChange: setRegistoMonth,
+                        }}
+                        active={!!registoDay.trim() || !!registoMonth.trim()}
+                      />
+                    </th>
                     <th className="p-3"><ColumnHeaderFilter label="NIF" textFilter={colNif} onTextFilter={setColNif} active={!!colNif.trim()} /></th>
                     <th className="p-3"><ColumnHeaderFilter label="ID da Venda" textFilter={colSaleId} onTextFilter={setColSaleId} active={!!colSaleId.trim()} /></th>
                     <th className="p-3"><ColumnHeaderFilter label="ID de Contrato" textFilter={colContrato} onTextFilter={setColContrato} active={!!colContrato.trim()} /></th>
-                    <th className="p-3"><ColumnHeaderFilter label="Estado (Instalação)" selectFilter={filter} onSelectFilter={setFilter} selectOptions={STATUS_OPTIONS.map((o) => ({ value: o.value, label: o.label }))} active={filter !== "__all"} /></th>
+                    <th className="p-3">
+                      <ColumnHeaderFilter
+                        label="Estado (Instalação)"
+                        checkboxFilter={{
+                          selected: statusFilters,
+                          options: STATUS_FILTER_OPTIONS.map((o) => ({ value: o.value, label: o.label })),
+                          onChange: setStatusFilters,
+                        }}
+                        active={statusFilters.length !== STATUS_FILTER_OPTIONS.length}
+                      />
+                    </th>
                     <th className="p-3">Estado do Contrato</th>
-                    <th className="p-3">Data de Activação</th>
+                    <th className="p-3">
+                      <ColumnHeaderFilter
+                        label="Data de Activação"
+                        dateFilter={{
+                          mode: ativacaoDateMode,
+                          dayValue: ativacaoDay,
+                          monthValue: ativacaoMonth,
+                          onModeChange: setAtivacaoDateMode,
+                          onDayChange: setAtivacaoDay,
+                          onMonthChange: setAtivacaoMonth,
+                        }}
+                        active={!!ativacaoDay.trim() || !!ativacaoMonth.trim()}
+                      />
+                    </th>
                     <th className="p-3 font-medium w-[150px]">Acções</th>
                   </tr>
                 </thead>
@@ -506,6 +580,7 @@ export default function Acompanhamento() {
                       >
                         <td className="p-3 font-medium">{r.contactName || "—"}</td>
                         <td className="p-3 font-mono text-xs text-muted-foreground">{r.contactPhone || "—"}</td>
+                        <td className="p-3 text-sm">{r.vendedorName || "—"}</td>
                         <td className="p-3 whitespace-nowrap text-muted-foreground">{registoLabel}</td>
                         <td className="p-3 font-mono text-xs">{nif || "—"}</td>
                         <td className="p-3 font-mono text-xs">{saleIdLabel}</td>
@@ -699,49 +774,131 @@ export default function Acompanhamento() {
               <ScrollArea className="h-[min(52vh,520px)] px-6">
                 <div className="space-y-3 py-4 pr-3">
                   <div className="space-y-3 rounded-lg border bg-muted/20 p-4">
-                    <h3 className="text-sm font-semibold">Serviços e burocracia</h3>
+                    <h3 className="text-sm font-semibold">Formulários</h3>
                     <div className="space-y-2">
-                      {(
-                        [
-                          ["titularTroca", "Troca de titularidade"],
-                          ["portabilidadeMovel", "Portabilidade móvel"],
-                          ["portabilidadeFixa", "Portabilidade fixa"],
-                          ["desativacaoApoiada", "Desativação apoiada"],
-                        ] as const
-                      ).map(([key, label]) => (
-                        <label key={key} className="flex items-center gap-2 text-sm">
-                          <Checkbox
-                            checked={services[key]}
-                            onCheckedChange={(v) =>
-                              setServices((s) => ({ ...s, [key]: v === true }))
-                            }
+                      <label className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={services.desativacaoApoiada}
+                          onCheckedChange={(v) =>
+                            setServices((s) => ({ ...s, desativacaoApoiada: v === true }))
+                          }
+                        />
+                        Desativação apoiada
+                      </label>
+                      {services.desativacaoApoiada ? (
+                        <div className="space-y-1 pl-6 border-l-2 border-primary/30">
+                          <Label className="text-xs">Conta de Cliente</Label>
+                          <Input
+                            value={form.conta_cliente ?? ""}
+                            onChange={(e) => setForm((prev) => ({ ...prev, conta_cliente: e.target.value }))}
+                            className="h-9"
                           />
-                          {label}
-                        </label>
-                      ))}
+                        </div>
+                      ) : null}
+                      <label className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={services.titularTroca}
+                          onCheckedChange={(v) => setServices((s) => ({ ...s, titularTroca: v === true }))}
+                        />
+                        Troca de titularidade
+                      </label>
+                      {services.titularTroca ? (
+                        <div className="grid gap-2 pl-6 border-l-2 border-primary/30 sm:grid-cols-2">
+                          <div className="space-y-1">
+                            <Label className="text-xs">Antigo titular — nome</Label>
+                            <Input
+                              value={services.antigoTitularNome}
+                              onChange={(e) =>
+                                setServices((s) => ({ ...s, antigoTitularNome: e.target.value }))
+                              }
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Antigo titular — NIF</Label>
+                            <Input
+                              value={services.antigoTitularNif}
+                              onChange={(e) =>
+                                setServices((s) => ({ ...s, antigoTitularNif: e.target.value }))
+                              }
+                            />
+                          </div>
+                        </div>
+                      ) : null}
+                      <label className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={debitoDireto}
+                          onCheckedChange={(v) => setDebitoDireto(v === true)}
+                        />
+                        Débito directo
+                      </label>
+                      {debitoDireto ? (
+                        <div className="space-y-1 pl-6 border-l-2 border-primary/30">
+                          <Label className="text-xs">IBAN</Label>
+                          <Input
+                            value={form.iban ?? ""}
+                            onChange={(e) => setForm((prev) => ({ ...prev, iban: e.target.value }))}
+                            className="h-9 font-mono"
+                          />
+                        </div>
+                      ) : null}
+                      <label className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={services.portabilidadeMovel}
+                          onCheckedChange={(v) =>
+                            setServices((s) => ({ ...s, portabilidadeMovel: v === true }))
+                          }
+                        />
+                        Portabilidade móvel
+                      </label>
+                      <label className="flex items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={services.portabilidadeFixa}
+                          onCheckedChange={(v) =>
+                            setServices((s) => ({ ...s, portabilidadeFixa: v === true }))
+                          }
+                        />
+                        Portabilidade fixa
+                      </label>
                     </div>
-                    {(services.titularTroca || services.desativacaoApoiada) && (
-                      <div className="grid gap-2 border-t pt-2 sm:grid-cols-2">
-                        <div className="space-y-1">
-                          <Label className="text-xs">Antigo titular — nome</Label>
-                          <Input
-                            value={services.antigoTitularNome}
-                            onChange={(e) =>
-                              setServices((s) => ({ ...s, antigoTitularNome: e.target.value }))
-                            }
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label className="text-xs">Antigo titular — NIF</Label>
-                          <Input
-                            value={services.antigoTitularNif}
-                            onChange={(e) =>
-                              setServices((s) => ({ ...s, antigoTitularNif: e.target.value }))
-                            }
-                          />
-                        </div>
+                    <div className="space-y-1 border-t pt-3">
+                      <Label className="text-xs">Cartões móveis</Label>
+                      <Select value={String(cartoesMoveis)} onValueChange={(v) => setCartoesMoveis(Number(v))}>
+                        <SelectTrigger className="h-9 w-24">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {[0, 1, 2, 3, 4].map((n) => (
+                            <SelectItem key={n} value={String(n)}>
+                              {n}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {cartoesMoveis > 0 ? (
+                      <div className="space-y-4 border-t pt-3">
+                        {Array.from({ length: cartoesMoveis }, (_, i) => i + 1).map((n) => (
+                          <div key={n} className="rounded-md border p-3 space-y-2">
+                            <p className="text-xs font-semibold">Cartão móvel {n}</p>
+                            {(["nr", "cvp", "kmat"] as const).map((prefix) => {
+                              const key = `${prefix}_${n}`;
+                              const field = SALE_CONTRACT_DOSSIER_FIELDS.find((f) => f.key === key);
+                              if (!field) return null;
+                              return (
+                                <div key={key} className="space-y-1">
+                                  <Label className="text-xs">{dossierFieldDisplayLabel(field)}</Label>
+                                  <Input
+                                    value={form[key] ?? ""}
+                                    onChange={(e) => setForm((prev) => ({ ...prev, [key]: e.target.value }))}
+                                    className="h-9"
+                                  />
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ))}
                       </div>
-                    )}
+                    ) : null}
                     <div className="space-y-1 border-t pt-2">
                       <Label className="text-xs">Estado documentação</Label>
                       <Select

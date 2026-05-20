@@ -1137,7 +1137,7 @@ export const appRouter = router({
             returnDateTo: z.string().optional(),
             priorityLevel: z.number().int().min(1).max(5).optional(),
             status: z
-              .enum(["agendado", "realizado", "expirado", "cancelado", "nao_fechou"])
+              .enum(["agendado", "fidelizado", "realizado", "expirado", "cancelado", "nao_fechou"])
               .optional(),
           })
           .optional(),
@@ -1251,10 +1251,14 @@ export const appRouter = router({
         }
 
         const hist = input.historicoChamada.trim();
-        const nextContactStatus =
-          input.contactStatusAfter === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente";
-        const dialerDest =
-          nextContactStatus === "cliente_fidelizado" ? "cliente_fidelizado" : "pendente";
+        const isFidelizado = input.contactStatusAfter === "cliente_fidelizado";
+        const nextContactStatus = isFidelizado ? "cliente_fidelizado" : "pendente";
+        const dialerDest = isFidelizado ? "cliente_fidelizado" : "pendente";
+        const returnAt = new Date(input.returnDate);
+        const pendenteNotes =
+          isFidelizado && !input.notes?.trim()
+            ? `Fim fidelização: ${returnAt.toLocaleString("pt-PT")}`
+            : input.notes?.trim() || null;
 
         let publicPendingId = "";
         await db.transaction(async (tx) => {
@@ -1263,11 +1267,10 @@ export const appRouter = router({
             contactId: input.contactId,
             vendedorId: assigneeId,
             criadorId: user?.id,
-            returnDate: new Date(input.returnDate),
-            notes: input.notes?.trim() || null,
+            returnDate: returnAt,
+            notes: pendenteNotes,
             offerDesired: input.offerDesired?.trim() || null,
-            status:
-              input.contactStatusAfter === "cliente_fidelizado" ? "fidelizado" : "agendado",
+            status: isFidelizado ? "fidelizado" : "agendado",
             priorityLevel: input.priorityLevel ?? 3,
             publicPendingId,
             clientNif: input.clientNif?.trim() || null,
@@ -2699,6 +2702,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
           salesPipeline: { aguarda_instalacao: 0, em_aberto: 0, activo: 0, e_switch: 0, cancelado: 0 },
           pendenteAlerts: [] as Array<{
             id: number;
+            publicPendingId: string | null;
             contactId: number;
             returnDate: Date;
             contactPhone: string | null;
@@ -2789,6 +2793,7 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
       }
       let alertQuery = db.select({
         id: pendentes.id,
+        publicPendingId: pendentes.publicPendingId,
         contactId: pendentes.contactId,
         returnDate: pendentes.returnDate,
         contactPhone: contacts.phone,
@@ -4130,6 +4135,9 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
             status: z
               .enum(["aguarda_instalacao", "em_aberto", "activo", "cancelado"])
               .optional(),
+            statuses: z
+              .array(z.enum(["aguarda_instalacao", "em_aberto", "activo", "cancelado"]))
+              .optional(),
             contactId: z.number().int().positive().optional(),
             createdFrom: z.string().optional(),
             createdTo: z.string().optional(),
@@ -4151,11 +4159,19 @@ Responda em **português de Portugal** para um vendedor: síntese útil, compara
         const cten = whereContactsForUser(user);
         if (cten) parts.push(cten);
         if (input?.contactId != null) parts.push(eq(sales.contactId, input.contactId));
-        if (input?.status) parts.push(eq(sales.status, input.status));
-        else
+        if (input?.statuses != null) {
+          if (input.statuses.length === 0) {
+            parts.push(sql`1=0`);
+          } else {
+            parts.push(inArray(sales.status, input.statuses));
+          }
+        } else if (input?.status) {
+          parts.push(eq(sales.status, input.status));
+        } else {
           parts.push(
             sql`${sales.status} IN ('aguarda_instalacao','em_aberto','activo')`,
           );
+        }
 
         if (input?.createdFrom?.trim()) {
           const d = new Date(input.createdFrom);

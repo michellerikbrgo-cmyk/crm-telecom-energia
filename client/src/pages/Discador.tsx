@@ -65,8 +65,12 @@ export default function Discador() {
   });
 
   const createPendenteMutation = trpc.pendentes.create.useMutation({
-    onSuccess: async () => {
-      toast.success("Pendente criado.");
+    onSuccess: async (res, vars) => {
+      const label =
+        vars.contactStatusAfter === "cliente_fidelizado"
+          ? `Cliente fidelizado — pendente ${res.publicPendingId ?? ""} criado`
+          : `Pendente ${res.publicPendingId ?? ""} criado`;
+      toast.success(label.trim());
       pendCloseOkRef.current = true;
       setPendModalOpen(false);
       setStep("idle");

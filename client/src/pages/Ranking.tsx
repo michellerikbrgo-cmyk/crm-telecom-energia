@@ -1,8 +1,8 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Trophy, Medal } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 type RankEntry = {
   position: number;
@@ -107,35 +107,36 @@ function Podium({ list, title }: { list: RankEntry[]; title: string }) {
 }
 
 export default function Ranking() {
+  const { user } = useAuth();
+  const crmRole = (user as { crmRole?: string; isSuperAdmin?: boolean } | null)?.crmRole ?? "vendedor";
+  const isSuperAdmin = !!(user as { isSuperAdmin?: boolean } | null)?.isSuperAdmin;
+
   const boardQuery = trpc.gamification.rankingBoard.useQuery();
   const board = boardQuery.data ?? { vendedores: [], cej: [], ce: [] };
 
+  const showVendedores = true;
+  const showCej = isSuperAdmin || crmRole === "cej" || crmRole === "ce" || crmRole === "coordenador";
+  const showCe = isSuperAdmin || crmRole === "ce" || crmRole === "coordenador";
+
   return (
-    <div className="space-y-6">
+    <div className="space-y-8">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Ranking da Equipa</h1>
         <p className="text-muted-foreground">
-          Competição no mesmo coordenador / tenant: três categorias — vendedores, chefes de equipa júnior e chefes
-          de equipa. Critério: vendas <strong>Activo</strong> com data de activação ou instalação no mês corrente.
+          Pódios empilhados por categoria no mesmo coordenador / tenant. Critério: vendas{" "}
+          <strong>Activo</strong> com data de activação ou instalação no mês corrente.
         </p>
       </div>
 
-      <Tabs defaultValue="vendedores" className="space-y-4">
-        <TabsList>
-          <TabsTrigger value="vendedores">Vendedores</TabsTrigger>
-          <TabsTrigger value="cej">Chefes de Equipa Júnior</TabsTrigger>
-          <TabsTrigger value="ce">Chefes de Equipa</TabsTrigger>
-        </TabsList>
-        <TabsContent value="vendedores">
-          <Podium list={(board.vendedores || []) as RankEntry[]} title="Pódio — Vendedores" />
-        </TabsContent>
-        <TabsContent value="cej">
-          <Podium list={(board.cej || []) as RankEntry[]} title="Pódio — Chefes de Equipa Júnior" />
-        </TabsContent>
-        <TabsContent value="ce">
-          <Podium list={(board.ce || []) as RankEntry[]} title="Pódio — Chefes de Equipa" />
-        </TabsContent>
-      </Tabs>
+      {showVendedores ? (
+        <Podium list={(board.vendedores || []) as RankEntry[]} title="Pódio — Vendedores" />
+      ) : null}
+      {showCej ? (
+        <Podium list={(board.cej || []) as RankEntry[]} title="Pódio — Chefes de Equipa Júnior" />
+      ) : null}
+      {showCe ? (
+        <Podium list={(board.ce || []) as RankEntry[]} title="Pódio — Chefes de Equipa" />
+      ) : null}
     </div>
   );
 }
